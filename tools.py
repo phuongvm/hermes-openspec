@@ -17,18 +17,19 @@ MAX_OUTPUT_CHARS = 50_000
 _ARTIFACT_ALIASES = {"spec": "specs"}
 
 
-def _load_cli_resolver():
-    """Load the sibling ``cli_resolver.py`` by path (works as package or top-level)."""
+def _load_sibling(module_name: str, filename: str):
+    """Load a dependency-free sibling module by path (works as package or top-level)."""
     import importlib.util
 
-    candidate = Path(__file__).resolve().parent / "cli_resolver.py"
-    spec = importlib.util.spec_from_file_location("openspec_cli_resolver", candidate)
+    candidate = Path(__file__).resolve().parent / filename
+    spec = importlib.util.spec_from_file_location(module_name, candidate)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-_cli_resolver = _load_cli_resolver()
+_cli_resolver = _load_sibling("openspec_cli_resolver", "cli_resolver.py")
+_artifacts_index = _load_sibling("openspec_artifacts_index", "artifacts_index.py")
 
 
 def _openspec_bin() -> str | None:
@@ -208,28 +209,12 @@ def _iter_change_dirs(root: Path):
                     yield child, True
 
 
-def _resolve_change(root: Path, registry, change_ref: str) -> tuple[Path | None, bool]:
-    """Map a change token (``os_xxx``) — or a literal change name (legacy) — to a
-    change folder under ``root``. Returns ``(change_dir, archived)``."""
-    for change_dir, archived in _iter_change_dirs(root):
-        if registry.change_token(change_dir.name) == change_ref or change_dir.name == change_ref:
-            return change_dir, archived
-    return None, False
-
-
 def _iter_specs(root: Path):
     specs_root = root / "openspec" / "specs"
     if specs_root.is_dir():
         for child in sorted(specs_root.rglob("*.md")):
             if child.is_file():
                 yield child.relative_to(specs_root).as_posix(), child
-
-
-def _resolve_spec(root: Path, registry, spec_ref: str) -> tuple[str | None, Path | None]:
-    for rel, path in _iter_specs(root):
-        if registry.change_token(f"spec:{rel}") == spec_ref or rel == spec_ref:
-            return rel, path
-    return None, None
 
 
 def _iter_ideas(root: Path):
@@ -241,13 +226,35 @@ def _iter_ideas(root: Path):
                 yield child
 
 
-def _resolve_idea(root: Path, registry, idea_ref: str) -> Path | None:
-    """Map an idea token (``os_xxx``) — or a literal idea stem (legacy) — to the
-    matching idea file. Returns ``None`` when nothing matches."""
-    for idea in _iter_ideas(root):
-        if registry.change_token(idea.stem) == idea_ref or idea.stem == idea_ref:
-            return idea
-    return None
+def _exploration_listing(records: list[dict]) -> list[dict]:
+    return [
+        {key: rec[key] for key in ("name", "filename", "scope", "token")} for rec in records
+    ]
+
+
+def _review_listing(records: list[dict]) -> list[dict]:
+    return [
+        {key: rec[key] for key in ("change", "name", "filename", "token", "verdict")}
+        for rec in records
+    ]
+
+
+def _context_failure(resolved: dict, ref: str, name: str, repo_path: Path) -> dict:
+    base = {"ok": False, "name": name, "path": str(repo_path), "error": resolved["error"]}
+    if resolved["error"] == "ambiguous":
+        base["candidates"] = resolved["candidates"]
+        base["message"] = (
+            f"Reference '{ref}' is ambiguous: it matches more than one artifact "
+            "(change, spec, idea, exploration, review). Use a qualified ref from 'candidates'."
+        )
+    elif resolved["error"] == "invalid_ref":
+        base["message"] = (
+            f"Reference '{ref}' is not a valid artifact reference "
+            "(token, kind:name, or a plain name without path separators)."
+        )
+    else:
+        base["message"] = f"No change, spec, idea, exploration, or review matching '{ref}' under openspec/."
+    return base
 
 
 def openspec_context(args: dict, **kwargs) -> str:
@@ -288,65 +295,67 @@ def openspec_context(args: dict, **kwargs) -> str:
         "hint": "Use this path as 'workdir' for other openspec_* tools, or run openspec commands from here.",
     }
 
+    index = _artifacts_index.build_index(repo_path, registry.change_token)
+
     if change_ref:
-        change_dir, archived = _resolve_change(repo_path, registry, change_ref)
-        spec_rel, spec_path = _resolve_spec(repo_path, registry, change_ref)
-        idea_path = _resolve_idea(repo_path, registry, change_ref)
-        matches = sum(
-            1 for matched in (change_dir is not None, spec_rel is not None, idea_path is not None) if matched
-        )
-        if matches > 1:
-            return json.dumps({
-                "ok": False,
-                "name": name,
-                "path": str(repo_path),
-                "error": (
-                    f"Reference '{change_ref}' is ambiguous: it matches more than one of the supported "
-                    "artifact kinds (change, spec, idea). Use a literal change name, spec path, or idea "
-                    "name instead."
-                ),
-            })
-        if idea_path is not None:
+        resolved = _artifacts_index.resolve_ref(index, change_ref)
+        if not resolved["ok"]:
+            return json.dumps(_context_failure(resolved, change_ref, name, repo_path))
+        kind, record = resolved["kind"], resolved["record"]
+        if kind == "idea":
             result["idea"] = {
-                "name": idea_path.stem,
-                "filename": idea_path.name,
-                "token": registry.change_token(idea_path.stem),
-                "content": _read_doc(idea_path),
+                "name": record["name"],
+                "filename": record["filename"],
+                "token": record["token"],
+                "content": _read_doc(Path(record["path"])),
             }
-            return json.dumps(result)
-        if change_dir is None:
-            if spec_rel and spec_path:
-                result["spec"] = {
-                    "path": spec_rel,
-                    "token": registry.change_token(f"spec:{spec_rel}"),
-                    "content": _read_doc(spec_path),
-                }
-                return json.dumps(result)
-            return json.dumps({
-                "ok": False,
-                "name": name,
-                "path": str(repo_path),
-                "error": f"No change, spec, or idea matching '{change_ref}' under openspec/.",
-            })
-        specs_root = change_dir / "specs"
-        specs = []
-        if specs_root.is_dir():
-            for child in sorted(specs_root.rglob("*.md")):
-                specs.append({
-                    "path": child.relative_to(specs_root).as_posix(),
-                    "content": _read_doc(child),
-                })
-        result["change"] = {
-            "name": change_dir.name,
-            "token": registry.change_token(change_dir.name),
-            "archived": archived,
-            "proposal": _read_doc(change_dir / "proposal.md"),
-            "tasks": _read_doc(change_dir / "tasks.md"),
-            "design": _read_doc(change_dir / "design.md"),
-            "specs": specs,
-        }
+        elif kind == "spec":
+            result["spec"] = {
+                "path": record["rel"],
+                "token": record["token"],
+                "content": _read_doc(Path(record["path"])),
+            }
+        elif kind == "exploration":
+            result["exploration"] = {
+                key: record[key]
+                for key in ("name", "filename", "scope", "token", "title", "date", "path")
+            }
+            result["exploration"]["content"] = _read_doc(Path(record["path"]))
+        elif kind == "review":
+            result["review"] = {
+                key: record[key]
+                for key in ("name", "filename", "change", "verdict", "round", "token", "path")
+            }
+            result["review"]["content"] = _read_doc(Path(record["path"]))
+        else:
+            change_dir = Path(record["path"])
+            specs_root = change_dir / "specs"
+            specs = []
+            if specs_root.is_dir():
+                for child in sorted(specs_root.rglob("*.md")):
+                    specs.append({
+                        "path": child.relative_to(specs_root).as_posix(),
+                        "content": _read_doc(child),
+                    })
+            result["change"] = {
+                "name": change_dir.name,
+                "token": record["token"],
+                "archived": record["archived"],
+                "proposal": _read_doc(change_dir / "proposal.md"),
+                "tasks": _read_doc(change_dir / "tasks.md"),
+                "design": _read_doc(change_dir / "design.md"),
+                "specs": specs,
+            }
+            result["explorations"] = _exploration_listing(
+                [e for e in index["explorations"] if e["scope"] == f"change:{change_dir.name}"]
+            )
+            result["reviews"] = _review_listing(
+                [r for r in index["reviews"] if r["change"] == change_dir.name]
+            )
     else:
-        change_dirs = [(change_dir, archived) for change_dir, archived in _iter_change_dirs(repo_path) if not archived]
+        change_dirs = [
+            (Path(c["path"]), c["archived"]) for c in index["changes"] if not c["archived"]
+        ]
         sequence = {}
         if hasattr(registry, "ensure_change_sequence"):
             sequence = registry.ensure_change_sequence(str(source.get("id") or source.get("token")), [change_dir.name for change_dir, _ in change_dirs])
@@ -358,21 +367,19 @@ def openspec_context(args: dict, **kwargs) -> str:
             }
             for change_dir, archived in change_dirs
         ]
-        specs = [
-            {"path": rel, "token": registry.change_token(f"spec:{rel}")}
-            for rel, _path in _iter_specs(repo_path)
-        ]
-        ideas = [
-            {"name": idea.stem, "filename": idea.name, "token": registry.change_token(idea.stem)}
-            for idea in _iter_ideas(repo_path)
-        ]
         result["changes"] = changes
-        result["specs"] = specs
-        result["ideas"] = ideas
+        result["specs"] = [{"path": s_["rel"], "token": s_["token"]} for s_ in index["specs"]]
+        result["ideas"] = [
+            {"name": i["name"], "filename": i["filename"], "token": i["token"]} for i in index["ideas"]
+        ]
+        result["explorations"] = _exploration_listing(index["explorations"])
+        result["reviews"] = _review_listing(index["reviews"])
         result["hint"] = (
             "Active changes are listed in 'changes'; current specs are listed in 'specs'; ideas are "
-            "listed in 'ideas'. Re-call with identifier "
-            f"'{name}/<token>' to load a specific change, spec, or idea, or use workdir with other "
+            "listed in 'ideas'; explorations and change reviews are listed in 'explorations' and "
+            "'reviews'. Re-call with identifier "
+            f"'{name}/<token>' (or a qualified ref such as 'exploration:<stem>@<change>' or "
+            "'review:<stem>@<change>') to load one artifact, or use workdir with other "
             "openspec_* tools."
         )
 

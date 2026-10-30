@@ -15,6 +15,7 @@ Routes
 - PUT    /sources/{source_id}                  — update a source's path/name
 - GET    /sources/{source_id}/changes/{change} — change detail (proposal/tasks/design/specs)
 - GET    /sources/{source_id}/ideas/{idea}     — idea detail (markdown content)
+- GET    /sources/{source_id}/explorations/{n}?scope= — exploration detail (workspace | change:<name>)
 - GET    /sources/{source_id}/specs?path=      — spec detail (current worktree content)
 - GET    /sources/{source_id}/spec-browser     — current/dirty/ref-diff spec browser
 
@@ -46,6 +47,7 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 _REGISTRY_PATH = Path(__file__).resolve().parent.parent / "registry.py"
 _CLI_RESOLVER_PATH = Path(__file__).resolve().parent.parent / "cli_resolver.py"
+_ARTIFACTS_INDEX_PATH = Path(__file__).resolve().parent.parent / "artifacts_index.py"
 
 
 def _load_registry():
@@ -79,6 +81,18 @@ def _load_cli_resolver():
 
 
 _cli_resolver = _load_cli_resolver()
+
+
+def _load_artifacts_index():
+    spec = importlib.util.spec_from_file_location("openspec_artifacts_index", _ARTIFACTS_INDEX_PATH)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_artifacts = _load_artifacts_index()
 
 
 def _find_openspec_bin() -> Optional[str]:
@@ -251,6 +265,7 @@ def _change_summary(path: Path, source_id: str, *, archived: bool = False) -> Op
     has_tasks = tasks_path.is_file()
     stats = _task_stats(tasks_path) if has_tasks else None
     name = path.name
+    reviews = _artifacts.scan_reviews(path, name, _change_token)
     return {
         "id": f"{source_id}/{name}",
         "token": _change_token(name),
@@ -261,6 +276,10 @@ def _change_summary(path: Path, source_id: str, *, archived: bool = False) -> Op
         "hasTasks": has_tasks,
         "hasDesign": design_path.is_file(),
         "hasSpecs": specs_path.is_dir(),
+        "hasExplorations": bool(_artifacts.scan_change_explorations(path, _change_token)),
+        "hasReviews": bool(reviews),
+        "reviewCount": len(reviews),
+        "latestVerdict": reviews[-1]["verdict"] if reviews else None,
         "taskStats": stats,
     }
 
@@ -331,6 +350,11 @@ def _scan(root: Path, source_id: str) -> Optional[dict[str, Any]]:
         except OSError:
             pass
 
+    change_dirs = [
+        d for d, _archived in _artifacts.iter_change_dirs(root)
+    ]
+    explorations = _artifacts.scan_explorations(root, change_dirs, _change_token)
+
     if _registry is not None and hasattr(_registry, "ensure_change_sequence"):
         try:
             sequence = _registry.ensure_change_sequence(source_id, [str(ch.get("name") or "") for ch in changes])
@@ -352,10 +376,12 @@ def _scan(root: Path, source_id: str) -> Optional[dict[str, Any]]:
         "changes": changes,
         "ideas": ideas,
         "specs": specs,
+        "explorations": explorations,
         "counts": {
             "changes": len(changes),
             "ideas": len(ideas),
             "specs": len(specs),
+            "explorations": len(explorations),
             "byStatus": by_status,
         },
     }
@@ -444,6 +470,10 @@ def _change_detail(root: Path, change_name: str) -> Optional[dict[str, Any]]:
                 })
         except OSError:
             pass
+    explorations = _artifacts.scan_change_explorations(change_dir, _change_token)
+    reviews = []
+    for review in _artifacts.scan_reviews(change_dir, change_dir.name, _change_token):
+        reviews.append({**review, "content": _read_doc(Path(review["path"])) or ""})
     return {
         "name": change_dir.name,
         "title": _title_from_markdown(proposal_path, change_dir.name),
@@ -454,6 +484,9 @@ def _change_detail(root: Path, change_name: str) -> Optional[dict[str, Any]]:
         "design": _read_doc(design_path),
         "tasks": _read_doc(tasks_path),
         "specs": specs,
+        "explorations": explorations,
+        "hasExplorations": bool(explorations),
+        "reviews": reviews,
     }
 
 
@@ -907,6 +940,18 @@ def idea_detail(source_id: str, idea_name: str):
     detail = _idea_detail(root, idea_name)
     if detail is None:
         raise HTTPException(status_code=404, detail="Idea not found")
+    return detail
+
+
+@router.get("/sources/{source_id}/explorations/{exploration_name}")
+def exploration_detail(source_id: str, exploration_name: str, scope: str = "workspace"):
+    _source, root = _resolve_source(source_id)
+    try:
+        detail = _artifacts.load_exploration(root, exploration_name, scope, _change_token)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid exploration name or scope")
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Exploration not found")
     return detail
 
 

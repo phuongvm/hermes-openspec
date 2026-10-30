@@ -294,7 +294,6 @@ def test_openspec_context_reports_cross_kind_ambiguity(tmp_path, monkeypatch):
     result = json.loads(tools.openspec_context({"identifier": f"demo/{token}"}))
 
     assert result["ok"] is False
-    error = result["error"].lower()
-    assert "ambiguous" in error
-    for kind in ("change", "spec", "idea"):
-        assert kind in error
+    assert result["error"] == "ambiguous"
+    assert {c["kind"] for c in result["candidates"]} == {"change", "idea"}
+    assert {c["ref"] for c in result["candidates"]} == {"change:same-artifact", "idea:same-artifact"}

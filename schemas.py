@@ -15,7 +15,10 @@ OPENSPEC_CONTEXT = {
         "identifier like 'puzzletea' (a registered repo, by its vanity name) or "
         "'puzzletea/os_a1b2c3' (a specific change or spec within it) and this returns the "
         "repo path plus the change proposal/tasks/design/specs content, or the spec content. "
-        "The bare repo name lists active changes and current specs with their tokens. Use the "
+        "The bare repo name lists active changes, current specs, ideas, explorations and change "
+        "reviews with their tokens. A reference after the slash may be a token (os_xxxxxx), a "
+        "kind-qualified name (change:, spec:, idea:, exploration:<stem>[@<change>], "
+        "review:<stem>@<change>) or a unique plain name; ambiguous names return candidates. Use the "
         "returned 'path' as 'workdir' for the other openspec_* tools. Call this "
         "first whenever the user gives you an OpenSpec identifier."
     ),
@@ -24,7 +27,7 @@ OPENSPEC_CONTEXT = {
         "properties": {
             "identifier": {
                 "type": "string",
-                "description": "A repo vanity name ('puzzletea') or name/change-token ('puzzletea/os_a1b2c3').",
+                "description": "A repo vanity name ('puzzletea') or name/ref ('puzzletea/os_a1b2c3', 'puzzletea/exploration:spike@demo').",
             },
         },
         "required": ["identifier"],
