@@ -640,7 +640,8 @@ def _write_change_scaffold(
     if with_spec:
         spec_path = _write_placeholder_spec(change_dir, change, title)
     (change_dir / ".openspec.yaml").write_text(
-        "schema: spec-driven\ncreatedAt: " + json.dumps(created) + "\n",
+        # OpenSpec >= 1.15 warns (and fails --strict) on unknown keys; x- keys are tool extensions (OPENSPEC-INV-1).
+        "schema: spec-driven\nx-createdAt: " + json.dumps(created) + "\n",
         encoding="utf-8",
     )
     paths = {
@@ -887,7 +888,8 @@ The system SHALL implement the approved behavior described by the promoted idea 
         "sourceIdea": rel_idea,
         "promotedAt": created,
     }
-    (change_dir / ".openspec.yaml").write_text("schema: spec-driven\nsourceIdea: " + json.dumps(rel_idea) + "\npromotedAt: " + json.dumps(created) + "\n", encoding="utf-8")
+    # OpenSpec >= 1.15 warns (and fails --strict) on unknown keys; x- keys are tool extensions (OPENSPEC-INV-1).
+    (change_dir / ".openspec.yaml").write_text("schema: spec-driven\nx-sourceIdea: " + json.dumps(rel_idea) + "\nx-promotedAt: " + json.dumps(created) + "\n", encoding="utf-8")
 
     return json.dumps({
         "ok": True,
