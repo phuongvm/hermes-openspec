@@ -88,6 +88,31 @@ If `openspec` isn't on your PATH, set `OPENSPEC_BIN`:
 export OPENSPEC_BIN=/home/user/.npm-global/bin/openspec
 ```
 
+### Binary resolution ladder
+
+`cli_resolver.py` is the single resolver used by the agent tools and the dashboard API. It returns the first existing, executable candidate:
+
+1. `OPENSPEC_BIN`
+2. `PATH` lookup (`shutil.which`)
+3. `%APPDATA%/npm/openspec.cmd`, then `%APPDATA%/npm/openspec`
+4. `%NVM_SYMLINK%/openspec.cmd`, then `%NVM_SYMLINK%/openspec`
+5. `C:/nvm4w/nodejs/openspec.cmd`, then `C:/nvm4w/nodejs/openspec` (Windows only)
+6. `~/.npm-global/bin/openspec`
+
+This lets Windows services with a stripped `PATH` still find the npm/nvm4w `.cmd` shim.
+
+### Bundled skills and duplicates
+
+The plugin ships `openspec-*` workflow skills. When the same skill already lives in `<hermes_home>/skills/` or in a `skills.external_dirs` entry, registering the bundled copy only adds a duplicate `plugin:openspec:*` entry. Control this with `plugins.entries.openspec.settings.register_bundled_skills` in `config.yaml`:
+
+| Value | Behavior |
+|---|---|
+| `auto` (default) | Skip a bundled skill when a same-named skill exists in `<hermes_home>/skills/` or `skills.external_dirs`; register the rest |
+| `true` | Always register every bundled skill |
+| `false` | Register no bundled skills (tools stay registered) |
+
+The environment variable `OPENSPEC_REGISTER_BUNDLED_SKILLS` (`auto` / `true` / `false`; `1`/`yes` and `0`/`no` also accepted) overrides the config value.
+
 ## Update
 
 ```bash

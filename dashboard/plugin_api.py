@@ -32,7 +32,6 @@ import difflib
 import importlib.util
 import os
 import re
-import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +45,7 @@ from pydantic import BaseModel
 # this file standalone via importlib (no package context for relative imports).
 # ---------------------------------------------------------------------------
 _REGISTRY_PATH = Path(__file__).resolve().parent.parent / "registry.py"
+_CLI_RESOLVER_PATH = Path(__file__).resolve().parent.parent / "cli_resolver.py"
 
 
 def _load_registry():
@@ -69,17 +69,21 @@ router = APIRouter()
 # Kept here so the plugin has zero core-dependency for filesystem traversal.
 # ---------------------------------------------------------------------------
 
+def _load_cli_resolver():
+    spec = importlib.util.spec_from_file_location("openspec_cli_resolver", _CLI_RESOLVER_PATH)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_cli_resolver = _load_cli_resolver()
+
+
 def _find_openspec_bin() -> Optional[str]:
-    """Locate the ``openspec`` CLI binary."""
-    candidates = [
-        os.getenv("OPENSPEC_BIN", "").strip(),
-        shutil.which("openspec") or "",
-        str(Path.home() / ".npm-global" / "bin" / "openspec"),
-    ]
-    for c in candidates:
-        if c and Path(c).exists() and os.access(c, os.X_OK):
-            return c
-    return None
+    """Locate the ``openspec`` CLI binary (shared ladder in ``cli_resolver.py``)."""
+    return _cli_resolver.resolve_openspec_bin()
 
 
 def _resolve_path(raw_path: str) -> Path:
@@ -873,7 +877,7 @@ def init_source(source_id: str):
     if exe:
         try:
             proc = subprocess.run(
-                [exe, "init", str(root), "--tools", "none"],
+                _cli_resolver.build_openspec_argv(exe, ["init", str(root), "--tools", "none"]),
                 capture_output=True, text=True, timeout=30, check=False,
             )
             if proc.returncode != 0:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+from typing import Any, Mapping
 
 try:
     from . import schemas
@@ -39,6 +41,157 @@ _WRITE_TOOLS = (
     ("openspec_spec_show", schemas.OPENSPEC_SPEC_SHOW, tools.openspec_spec_show, "📄"),
     ("openspec_spec_list", schemas.OPENSPEC_SPEC_LIST, tools.openspec_spec_list, "📋"),
 )
+
+
+_TRUE_WORDS = {"true", "1", "yes", "on"}
+_FALSE_WORDS = {"false", "0", "no", "off"}
+
+
+def _hermes_home() -> Path:
+    try:
+        from hermes_constants import get_hermes_home
+
+        return Path(get_hermes_home())
+    except Exception:
+        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+
+
+def _scalar(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+def _mini_yaml(text: str) -> dict:
+    """Stdlib subset parser (nested maps and scalar lists) used when PyYAML is absent."""
+    root: dict = {}
+    # stack entries: (indent, container, parent_container, key_in_parent)
+    stack: list[tuple[int, Any, Any, str | None]] = [(-1, root, None, None)]
+    for raw in text.splitlines():
+        body = raw.split(" #", 1)[0].rstrip()
+        if not body.strip() or body.lstrip().startswith("#"):
+            continue
+        indent = len(body) - len(body.lstrip())
+        line = body.strip()
+        while len(stack) > 1 and indent <= stack[-1][0] and not (
+            line.startswith("- ") and indent == stack[-1][0] and isinstance(stack[-1][1], list)
+        ):
+            stack.pop()
+        _, container, parent, key_in_parent = stack[-1]
+        if line.startswith("- "):
+            if isinstance(container, dict) and not container and parent is not None:
+                container = []
+                parent[key_in_parent] = container
+                stack[-1] = (stack[-1][0], container, parent, key_in_parent)
+            if isinstance(container, list):
+                container.append(_scalar(line[2:]))
+            continue
+        key, sep, value = line.partition(":")
+        if not sep or not isinstance(container, dict):
+            continue
+        key = key.strip()
+        if value.strip():
+            container[key] = _scalar(value)
+        else:
+            container[key] = {}
+            stack.append((indent, container[key], container, key))
+    return root
+
+
+def _load_config(hermes_home: Path) -> dict:
+    path = Path(hermes_home) / "config.yaml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        import yaml  # type: ignore
+
+        data = yaml.safe_load(text)
+        return data if isinstance(data, dict) else {}
+    except ImportError:
+        pass
+    except Exception:
+        return {}
+    try:
+        return _mini_yaml(text)
+    except Exception:
+        return {}
+
+
+def _register_bundled_skills_mode(config: Mapping[str, Any]) -> str:
+    raw: Any = os.environ.get("OPENSPEC_REGISTER_BUNDLED_SKILLS", "").strip()
+    if not raw:
+        raw = config
+        for key in ("plugins", "entries", "openspec", "settings", "register_bundled_skills"):
+            raw = raw.get(key) if isinstance(raw, Mapping) else None
+    word = str(raw).strip().lower() if raw is not None else ""
+    if word in _TRUE_WORDS:
+        return "true"
+    if word in _FALSE_WORDS:
+        return "false"
+    return "auto"
+
+
+def _skill_roots(hermes_home: Path, config: Mapping[str, Any]) -> list[Path]:
+    roots = [Path(hermes_home) / "skills"]
+    skills_cfg = config.get("skills") if isinstance(config, Mapping) else None
+    external = skills_cfg.get("external_dirs") if isinstance(skills_cfg, Mapping) else None
+    if isinstance(external, str):
+        external = [external]
+    for entry in external or []:
+        try:
+            roots.append(Path(str(entry)).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    return roots
+
+
+def should_register_bundled_skill(
+    skill_name: str,
+    *,
+    mode: str = "auto",
+    hermes_home: Path | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> bool:
+    """Decide whether the bundled ``skill_name`` is registered as ``plugin:openspec:<name>``."""
+    mode = str(mode or "auto").strip().lower()
+    if mode == "true":
+        return True
+    if mode == "false":
+        return False
+    home = Path(hermes_home) if hermes_home is not None else _hermes_home()
+    cfg = config if config is not None else _load_config(home)
+    for root in _skill_roots(home, cfg):
+        try:
+            if (root / skill_name / "SKILL.md").is_file():
+                return False
+            if any(hit.is_file() for hit in root.glob(f"*/{skill_name}/SKILL.md")):
+                return False
+        except OSError:
+            continue
+    return True
+
+
+def register_bundled_skills(ctx, *, hermes_home: Path | None = None) -> None:
+    """Register bundled upstream workflow skills according to ``register_bundled_skills``."""
+    home = Path(hermes_home) if hermes_home is not None else _hermes_home()
+    config = _load_config(home)
+    mode = _register_bundled_skills_mode(config)
+    if mode == "false":
+        return
+    skills_dir = _PLUGIN_DIR / "skills"
+    for child in sorted(skills_dir.iterdir()) if skills_dir.is_dir() else []:
+        skill_md = child / "SKILL.md"
+        if not (child.is_dir() and skill_md.exists()):
+            continue
+        if not should_register_bundled_skill(child.name, mode=mode, hermes_home=home, config=config):
+            continue
+        try:
+            ctx.register_skill(child.name, skill_md)
+        except Exception:
+            logger.warning("Failed to register skill %s", child.name, exc_info=True)
 
 
 def _check_openspec_available() -> bool:
@@ -82,12 +235,4 @@ def register(ctx) -> None:
         check_fn=_check_openspec_available,
         emoji="🖥️",
     )
-    # Register bundled upstream workflow skills (openspec-propose, openspec-apply-change, etc.)
-    skills_dir = _PLUGIN_DIR / "skills"
-    for child in sorted(skills_dir.iterdir()) if skills_dir.is_dir() else []:
-        skill_md = child / "SKILL.md"
-        if child.is_dir() and skill_md.exists():
-            try:
-                ctx.register_skill(child.name, skill_md)
-            except Exception:
-                logger.warning("Failed to register skill %s", child.name, exc_info=True)
+    register_bundled_skills(ctx)

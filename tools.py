@@ -17,17 +17,22 @@ MAX_OUTPUT_CHARS = 50_000
 _ARTIFACT_ALIASES = {"spec": "specs"}
 
 
+def _load_cli_resolver():
+    """Load the sibling ``cli_resolver.py`` by path (works as package or top-level)."""
+    import importlib.util
+
+    candidate = Path(__file__).resolve().parent / "cli_resolver.py"
+    spec = importlib.util.spec_from_file_location("openspec_cli_resolver", candidate)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_cli_resolver = _load_cli_resolver()
+
+
 def _openspec_bin() -> str | None:
-    configured = os.getenv("OPENSPEC_BIN", "").strip()
-    candidates = [
-        configured,
-        shutil.which("openspec") or "",
-        str(Path.home() / ".npm-global" / "bin" / "openspec"),
-    ]
-    for candidate in candidates:
-        if candidate and Path(candidate).exists() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    return _cli_resolver.resolve_openspec_bin()
 
 
 def _resolve_workdir(value: Any) -> tuple[Path | None, str | None]:
@@ -73,7 +78,7 @@ def _run(args: list[str], workdir: Any = None) -> str:
     env.setdefault("OPENSPEC_TELEMETRY", "0")
     env.setdefault("NO_COLOR", "1")
 
-    cmd = [exe, *args]
+    cmd = _cli_resolver.build_openspec_argv(exe, args)
     try:
         proc = subprocess.run(
             cmd,
@@ -1589,7 +1594,7 @@ def openspec_cli(args: dict, **kwargs) -> str:
 
     try:
         proc = subprocess.run(
-            [exe, *cmd_parts],
+            _cli_resolver.build_openspec_argv(exe, cmd_parts),
             capture_output=True,
             text=True,
             timeout=120,
