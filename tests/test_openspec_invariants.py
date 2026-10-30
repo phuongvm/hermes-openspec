@@ -6,6 +6,8 @@ OPENSPEC-INV-2: tests/conftest.py makes the plugin's own top-level modules win o
 """
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -55,3 +57,65 @@ def test_inv2_plugin_modules_resolve_inside_plugin_root():
         mod = __import__(name)
         assert PLUGIN_ROOT in Path(mod.__file__).resolve().parents, (name, mod.__file__)
     assert Path(sys.path[0]).resolve() == PLUGIN_ROOT
+
+
+def test_inv2_pytest_ignores_foreign_python_site_packages_on_pythonpath(tmp_path):
+    """Foreign-ABI site-packages on PYTHONPATH (pyvenv.cfg, POSIX pythonX.Y, ABI tag) must be pruned."""
+    foreign_minor = sys.version_info[1] + 9
+    maj = sys.version_info[0]
+
+    # 1. Windows venv layout (pyvenv.cfg)
+    foreign_venv = tmp_path / "foreign_venv"
+    win_sp = foreign_venv / "Lib" / "site-packages"
+    win_sp.mkdir(parents=True)
+    (foreign_venv / "pyvenv.cfg").write_text(
+        f"home = {tmp_path}\nversion_info = {maj}.{foreign_minor}.0\n",
+        encoding="utf-8",
+    )
+
+    # 2. POSIX lib/pythonX.Y/site-packages layout (no pyvenv.cfg)
+    posix_sp = tmp_path / "posix_env" / "lib" / f"python{maj}.{foreign_minor}" / "site-packages"
+    posix_sp.mkdir(parents=True)
+
+    # 3. Bare site-packages identified by C-extension ABI tag (no pyvenv.cfg)
+    abi_sp = tmp_path / "abi_only" / "site-packages"
+    abi_sp.mkdir(parents=True)
+    (abi_sp / f"_dummy.cp{maj}{foreign_minor}-win_amd64.pyd").write_bytes(b"")
+
+    for sp in (win_sp, posix_sp, abi_sp):
+        for pkg in ("pydantic", "pydantic_core", "fastapi"):
+            pkg_dir = sp / pkg
+            pkg_dir.mkdir()
+            (pkg_dir / "__init__.py").write_text(
+                "raise ImportError('foreign ABI site-packages must not be imported')\n",
+                encoding="utf-8",
+            )
+
+    existing_pp = [
+        p for p in (os.environ.get("PYTHONPATH") or "").split(os.pathsep) if p
+    ]
+    for entry in sys.path:
+        if entry and (Path(entry) / "hermes_constants.py").is_file() and entry not in existing_pp:
+            existing_pp.append(entry)
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join([str(win_sp), str(posix_sp), str(abi_sp), *existing_pp])
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(PLUGIN_ROOT / "tests" / "test_subproject_sources.py"),
+            "-k",
+            "test_subproject_with_own_openspec_resolves_to_itself",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
