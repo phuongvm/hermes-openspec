@@ -17,19 +17,12 @@ MAX_OUTPUT_CHARS = 50_000
 _ARTIFACT_ALIASES = {"spec": "specs"}
 
 
-def _load_sibling(module_name: str, filename: str):
-    """Load a dependency-free sibling module by path (works as package or top-level)."""
-    import importlib.util
-
-    candidate = Path(__file__).resolve().parent / filename
-    spec = importlib.util.spec_from_file_location(module_name, candidate)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_cli_resolver = _load_sibling("openspec_cli_resolver", "cli_resolver.py")
-_artifacts_index = _load_sibling("openspec_artifacts_index", "artifacts_index.py")
+try:
+    from . import artifacts_index as _artifacts_index
+    from . import cli_resolver as _cli_resolver
+except ImportError:  # pragma: no cover - loaded as a top-level module (pytest root, dashboard)
+    import artifacts_index as _artifacts_index  # type: ignore
+    import cli_resolver as _cli_resolver  # type: ignore
 
 
 def _openspec_bin() -> str | None:
@@ -160,28 +153,17 @@ def _template_instruction_fallback(artifact: str, reason: str, workdir: Any = No
 
 
 def _registry_module():
-    """Import the plugin-local OpenSpec registry (``plugins.openspec.registry``).
-
-    Tolerates odd sys.path setups where the package isn't importable by name;
-    in that case fall back to a path-based load from this file's location.
-    """
+    """Import the plugin-local OpenSpec registry (package-relative, else top-level)."""
     try:
         from . import registry  # type: ignore
         return registry
-    except Exception:
+    except ImportError:
         pass
     try:
-        import importlib.util
-        candidate = Path(__file__).resolve().parent / "registry.py"
-        if candidate.is_file():
-            spec = importlib.util.spec_from_file_location("openspec_registry", candidate)
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                return mod
-    except Exception:
-        pass
-    return None
+        import registry  # type: ignore
+        return registry
+    except ImportError:
+        return None
 
 
 def _read_doc(path: Path) -> str:
