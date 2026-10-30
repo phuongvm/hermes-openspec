@@ -73,6 +73,54 @@ the reference.
 > design.md, spec.md, tasks.md) using normal file tools. This is by design —
 > the guide is reusable, the content is human/agent judgment.
 
+## `openspec_context` references, explorations and reviews
+
+`openspec_context` takes `<source>` or `<source>/<ref>`.
+
+| Form | Example | Selects |
+|---|---|---|
+| Bare source | `demoapp` | Lists `changes`, `specs`, `ideas`, `explorations`, `reviews` with tokens (no file content) |
+| Token | `demoapp/os_a1b2c3` | The single artifact with that token |
+| Qualified | `demoapp/exploration:spike@demo` | One kind and scope |
+| Unqualified | `demoapp/board-search` | The artifact, only when exactly one matches |
+
+Grammar (`artifacts_index.parse_ref`):
+
+```
+ref        := token | qualified | literal
+token      := "os_" 6*6HEXDIG
+qualified  := "change:" NAME | "spec:" NAME | "idea:" STEM
+            | "exploration:" STEM [ "@" CHANGE ]
+            | "review:" STEM "@" CHANGE
+literal    := NAME
+NAME/STEM/CHANGE := 1*( ALPHA / DIGIT / "." / "_" / "-" )
+```
+
+- `exploration:<stem>` without `@` is workspace scope only; change-local explorations need `@<change>` or their token. `review:` always needs `@<change>`.
+- Path separators, `..`, whitespace or an unknown qualifier return `ok: false, error: "invalid_ref"` and nothing is read.
+- No match returns `error: "not_found"`. More than one match (a spec and an exploration with the same name, or one review stem in two changes) returns `error: "ambiguous"` with `candidates: [{kind, ref}]` (`ref` is the qualified form) and no content.
+
+Result keys when a single artifact is resolved:
+
+| Key | Fields |
+|---|---|
+| `exploration` | `name, filename, scope, token, title, date, path, content` |
+| `review` | `name, filename, change, verdict, round, token, path, content` |
+| `change` / `spec` / `idea` | unchanged; `change` also carries that change's `explorations` and `reviews` lists |
+
+`scope` is `workspace` or `change:<change_name>`. `verdict` is `APPROVED`, `REJECTED` or `PENDING`; only a structured `Verdict:` line or a bolded marker counts, so prose such as "not approved yet" stays `PENDING`.
+
+### Dashboard API additions
+
+| Route | Returns |
+|---|---|
+| `GET /sources` | per source: `openspec.explorations`, `counts.explorations`; per change: `hasExplorations`, `hasReviews`, `reviewCount`, `latestVerdict`, `crewCards` |
+| `GET /sources/{id}/changes/{change}` | adds `explorations`, `hasExplorations`, `reviews` (with `content`), `crewCards` |
+| `GET /sources/{id}/explorations/{name}?scope=workspace\|change:<change>` | one exploration with `path` and `content`; HTTP 400 for a malformed name or scope, 404 when absent |
+| `POST /sources/{id}/discover` | body `{"register": false}` (default) previews `candidates`; `{"register": true}` registers only new repositories (idempotent) |
+
+`crewCards` entries are `{id, title, status, assignee, board, url}` with `url` of the form `/crew?card=<id>`. They are read from the Crew `kanban.db` files opened read-only and appear only when a card title or body names an artifact by `openspec/...` path or by token.
+
 ---
 
 ← [Back to overview](index.md) · [← Previous: Lifecycle](lifecycle.md) · [Next: Delegation →](delegation.md)

@@ -101,3 +101,35 @@ The dashboard UI SHALL present compact controls for selecting and managing regis
 - **WHEN** the dashboard renders the OpenSpec tab
 - **THEN** it shows an empty-state path to add a source instead of rendering a broken board
 
+
+### Requirement: Exploration and review artifacts
+The dashboard API SHALL scan `openspec/workspace/explorations/*.md` (scope `workspace`) and `<change>/explorations/*.md` (scope `change:<name>`), expose them in the source scan and change detail, and serve one exploration through `GET /sources/{id}/explorations/{name}?scope=`; it SHALL scan `<change>/reviews/*.md` and expose each review's `verdict` (`APPROVED`, `REJECTED`, `PENDING`) and `round`.
+
+#### Scenario: Scan and detail
+- **WHEN** a source has a workspace exploration and a change with an exploration and two reviews
+- **THEN** `GET /sources` reports `counts.explorations`, and the change detail lists the change-local `explorations` and the `reviews` with verdicts
+
+#### Scenario: Traversal and unknown names
+- **WHEN** an exploration name or scope is malformed
+- **THEN** the API returns HTTP 400, and a well-formed name that does not exist returns HTTP 404
+
+### Requirement: Read-only Crew card linkage
+The dashboard API SHALL attach `crewCards` to a change or exploration only when a Crew card title or body references it by an `openspec/` path or its token, reading `kanban.db` files strictly read-only.
+
+#### Scenario: Prose does not link
+- **WHEN** a card mentions only a bare stem, or `openspec/changes/demo-extra` for change `demo`
+- **THEN** no `crewCards` entry is attached
+
+### Requirement: Source discovery
+The dashboard API SHALL provide `POST /sources/{id}/discover` that finds repositories with an `openspec/` folder among `.gitmodules` paths, depth-1 children and depth-2 children of non-git grouping directories, with preview (`register: false`) and idempotent registration (`register: true`).
+
+#### Scenario: Preview writes nothing
+- **WHEN** discover is called with `register: false`
+- **THEN** it returns `candidates` and `registered: []` and the registry is unchanged
+
+### Requirement: Dockable Desktop route tile
+The Desktop plugin SHALL register its sidebar navigation with `asTile: true`.
+
+#### Scenario: Tile registration
+- **WHEN** Desktop calls `plugin.register(ctx)`
+- **THEN** the `SIDEBAR_NAV_AREA` entry for `/openspec` carries `asTile: true`

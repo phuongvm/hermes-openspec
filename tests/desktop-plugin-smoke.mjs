@@ -1444,16 +1444,17 @@ check(!source.includes('item.artifacts || item.artifactNames'), 'Old artifacts/a
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log('\n[Structural] SDK usage pattern checks')
 
-// 1. DialogContent: must be imported and used inside Dialog (source + remove confirm)
+// 1. DialogContent: must be imported and used inside Dialog (source + remove confirm + discover)
 check(source.includes('DialogContent'), 'DialogContent is imported from SDK')
 {
   // Find DialogContent usage inside Dialog children (not just import). There
-  // must be exactly two modal usages: SourceDialog and remove confirmation.
+  // must be exactly three modal usages, all source management: SourceDialog,
+  // remove confirmation, and the Slice 2 Discover dialog.
   const jsxMatches = source.match(/jsx\(DialogContent/g) || []
   const jsxsMatches = source.match(/jsxs\(DialogContent/g) || []
   const dialogContentUsage = jsxMatches.concat(jsxsMatches)
-  check(dialogContentUsage.length === 2,
-    'DialogContent used in exactly two modal dialogs (source dialog and remove confirmation)',
+  check(dialogContentUsage.length === 3,
+    'DialogContent used in exactly three modal dialogs (source dialog, remove confirmation, discover)',
     dialogContentUsage ? 'Found ' + dialogContentUsage.length + ' usages' : 'No usages found')
 }
 
@@ -2436,6 +2437,190 @@ console.log('\n[Remediation 3.14] Visible keyboard focus wash')
     JSON.stringify(rl.focusWashExact))
   check(rl.noDeadOutline === true, 'Collapsed rail no longer relies on focus-visible:outline-2 + focus-visible:outline-(--ui-focus-border)',
     JSON.stringify(rl.noDeadOutline))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Slice 2: explorations, change reviews, Crew linkage, Discover, asTile
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('\n[Slice 2] Explorations, reviews, Crew linkage, Discover, route tile')
+
+function runSlice2Driver() {
+  try {
+    const raw = execSync('node ' + resolve(__dirname, '_slice2_ui_driver.mjs'), { encoding: 'utf8', timeout: 30000 }).trim()
+    return JSON.parse(raw)
+  } catch (e) {
+    return { __driverError: (e.message || '').slice(0, 800) }
+  }
+}
+const s2 = runSlice2Driver()
+check(!s2.__driverError, 'Slice 2 driver executes', s2.__driverError)
+
+{
+  const ex = s2.exports || {}
+  for (const n of ['explorationPath', 'discoverSourcesPath', 'ExplorationsView', 'ExplorationDetailDrawer', 'ReviewsView', 'CrewCardChips', 'DiscoverControl']) {
+    check(ex[n] === 'function', '__test exports ' + n, ex[n])
+  }
+}
+
+console.log('  Path builders')
+{
+  const p = s2.paths || {}
+  check(p.ws === '/sources/src-1/explorations/2026-10-30-topic?scope=workspace', 'explorationPath workspace scope', p.ws)
+  check(p.change === '/sources/src-1/explorations/spike?scope=change%3Ademo', 'explorationPath change scope is encoded', p.change)
+  check(p.dflt === '/sources/src-1/explorations/spike?scope=workspace', 'explorationPath defaults to workspace', p.dflt)
+  check(p.special === '/sources/a%20b/explorations/x%26y?scope=change%3Ad%2Fe', 'explorationPath encodes every segment', p.special)
+  check(p.discover === '/sources/src%201/discover', 'discoverSourcesPath encodes the source id', p.discover)
+}
+
+console.log('  Pure helpers')
+{
+  const h = s2.helpers || {}
+  check(h.scopeWs === 'Workspace', 'scope label: workspace', JSON.stringify(h.scopeWs))
+  check(h.scopeChange === 'Change: demo', 'scope label: change', JSON.stringify(h.scopeChange))
+  check(h.scopeEmpty === 'Workspace', 'scope label: missing scope defaults to workspace', JSON.stringify(h.scopeEmpty))
+  check(h.filterEmpty === 3, 'filterExplorations: empty query keeps all', JSON.stringify(h.filterEmpty))
+  check(JSON.stringify(h.filterTitle) === '["new"]', 'filterExplorations: matches title', JSON.stringify(h.filterTitle))
+  check(JSON.stringify(h.filterScope) === '["new"]', 'filterExplorations: matches scope', JSON.stringify(h.filterScope))
+  check(JSON.stringify(h.filterToken) === '["mid"]', 'filterExplorations: token match is case-insensitive', JSON.stringify(h.filterToken))
+  check(h.filterNone === 0, 'filterExplorations: no match -> empty', JSON.stringify(h.filterNone))
+  check(JSON.stringify(h.sorted) === '["new","mid","old"]', 'sortExplorations: newest date first', JSON.stringify(h.sorted))
+  check(h.toneApproved && h.toneRejected && h.tonePending && h.toneApproved !== h.toneRejected, 'verdictTone distinguishes verdicts')
+  check(typeof h.toneUnknown === 'string' && h.toneUnknown === h.tonePending, 'verdictTone: unknown falls back to pending tone', JSON.stringify(h.toneUnknown))
+  check(JSON.stringify(h.tabsAll) === '["proposal","tasks","design","specs","reviews","explorations"]', 'change tabs: Reviews + Explorations appended', JSON.stringify(h.tabsAll))
+  check(JSON.stringify(h.tabsReviewsOnly) === '["proposal","reviews"]', 'change tabs: Reviews only when only reviews exist', JSON.stringify(h.tabsReviewsOnly))
+  check(JSON.stringify(h.tabsEmptyArrays) === '["proposal"]', 'change tabs: empty review/exploration arrays add no tab', JSON.stringify(h.tabsEmptyArrays))
+  check(JSON.stringify(h.tabsNone) === '[]', 'change tabs: nothing -> no tabs', JSON.stringify(h.tabsNone))
+}
+
+console.log('  API adapter')
+{
+  const calls = (s2.api && s2.api.calls) || []
+  check(calls[0] && calls[0].path === '/sources/s1/explorations/spike?scope=change%3Ademo' && !calls[0].opts, 'api.exploration issues a GET to the scoped path', JSON.stringify(calls[0]))
+  const reg = calls[1]
+  check(reg && reg.path === '/sources/s1/discover' && reg.opts && reg.opts.method === 'POST' && reg.opts.body && reg.opts.body.register === true, 'api.discoverSources(register=true) POSTs via ctx.rest options', JSON.stringify(reg))
+  const preview = calls[2]
+  check(preview && preview.opts && preview.opts.method === 'POST' && preview.opts.body && preview.opts.body.register === false, 'api.discoverSources(register=false) previews', JSON.stringify(preview))
+}
+
+console.log('  ExplorationsView')
+{
+  const v = s2.view || {}
+  check(!v.__error, 'ExplorationsView renders', v.__error)
+  check(v.rowCount === 3, 'ExplorationsView lists every exploration (workspace + change-local)', JSON.stringify(v.rowCount))
+  check(typeof v.allRowText === 'string' && v.allRowText.indexOf('New Topic') >= 0 && v.allRowText.indexOf('Old Topic') >= 0, 'rows show exploration titles', v.allRowText)
+  check((v.firstRowText || '').indexOf('New Topic') >= 0, 'newest exploration is listed first', v.firstRowText)
+  check(Array.isArray(v.scopeBadges) && v.scopeBadges.indexOf('Workspace') >= 0 && v.scopeBadges.indexOf('Change: demo') >= 0, 'rows carry scope badges', JSON.stringify(v.scopeBadges))
+  check(v.selectedType === 'exploration' && v.selectedName === 'new', 'clicking a row selects it as an exploration item', JSON.stringify([v.selectedType, v.selectedName]))
+  check(v.keyboardSelects === 2, 'Enter key activates a row', JSON.stringify(v.keyboardSelects))
+  check((v.copyRefs || []).indexOf('demoapp/os_000002') >= 0, 'row copy action yields <source>/<token>', JSON.stringify(v.copyRefs))
+  check(v.hasInput === 1, 'ExplorationsView has a search filter', JSON.stringify(v.hasInput))
+  check((s2.viewEmpty || {}).emptyStates === 1, 'ExplorationsView shows an EmptyState when none exist', JSON.stringify(s2.viewEmpty))
+}
+
+console.log('  ExplorationDetailDrawer')
+{
+  const d = s2.drawer || {}
+  check(!d.__error, 'ExplorationDetailDrawer renders', d.__error)
+  check(d.title === 'New Topic', 'drawer title is the exploration title', d.title)
+  check(d.secondary === 'new.md', 'drawer secondary line is the filename', d.secondary)
+  check(d.itemRef === 'demoapp/os_000002' && d.canCopy === true, 'drawer copies <source>/<token>', JSON.stringify([d.itemRef, d.canCopy]))
+  check(d.token === 'os_000002', 'drawer shows the token', d.token)
+  check(d.hasBody === true && d.bodyScope === 'change:demo', 'drawer renders ExplorationBody for the scope', JSON.stringify([d.hasBody, d.bodyScope]))
+  const b = s2.body || {}
+  check(!b.__error, 'ExplorationBody renders', b.__error)
+  check(b.mentionsDate === true && b.mentionsScope === true, 'body shows date and scope', JSON.stringify(b))
+}
+
+console.log('  Change reviews')
+{
+  const r = s2.reviews || {}
+  check(!r.__error, 'ReviewsView renders', r.__error)
+  check(Array.isArray(r.badgeTexts) && r.badgeTexts.indexOf('REJECTED') >= 0 && r.badgeTexts.indexOf('APPROVED') >= 0, 'ReviewsView shows a verdict badge per review', JSON.stringify(r.badgeTexts))
+  check(r.mentionsRound === true, 'ReviewsView shows the round', JSON.stringify(r.mentionsRound))
+  check(r.listButtons === 2, 'ReviewsView lists each review', JSON.stringify(r.listButtons))
+  check(s2.reviewsEmpty === 1, 'ReviewsView empty -> EmptyState', JSON.stringify(s2.reviewsEmpty))
+  const ct = s2.changeTabs || {}
+  check(!ct.__error, 'ChangeDetailDrawer renders with reviews/explorations', ct.__error)
+  const triggers = ct.triggers || []
+  check(triggers.some(x => x.indexOf('reviews:') === 0), 'Change detail has a Reviews tab', JSON.stringify(triggers))
+  check(triggers.some(x => x.indexOf('explorations:') === 0), 'Change detail has an Explorations tab', JSON.stringify(triggers))
+  check(ct.chipsRendered === 1 && ct.chipCards === 1, 'Change detail renders Crew card chips from the detail payload', JSON.stringify([ct.chipsRendered, ct.chipCards]))
+}
+
+console.log('  Page, tile and counts')
+{
+  const pg = s2.page || {}
+  check(!pg.__error, 'OpenSpecPage renders', pg.__error)
+  check(JSON.stringify(pg.options) === '["work:Work","explorations:Explorations","specs:Specs"]', 'SegmentedControl: Work / Explorations / Specs', JSON.stringify(pg.options))
+  check(pg.hasExplorationsBadge === true, 'toolbar shows the explorations count badge', JSON.stringify(pg.badgeTexts))
+  const reg = s2.register || {}
+  check(reg.nav && reg.nav.asTile === true, 'SIDEBAR_NAV_AREA registers asTile: true', JSON.stringify(reg.nav))
+  check(reg.nav && reg.nav.path === '/openspec' && reg.nav.label === 'OpenSpec' && reg.nav.codicon === 'list-tree', 'sidebar nav keeps path/label/codicon', JSON.stringify(reg.nav))
+  check(reg.route && reg.route.path === '/openspec', 'route stays at /openspec', JSON.stringify(reg.route))
+}
+
+console.log('  Crew card linkage and Discover')
+{
+  const c = s2.crew || {}
+  check(!c.__error, 'CrewCardChips renders', c.__error)
+  check(c.chipCount === 2, 'one chip per Crew card', JSON.stringify(c.chipCount))
+  check((c.chipText || [])[0] && c.chipText[0].indexOf('t_aaa111') >= 0 && c.chipText[0].indexOf('running') >= 0, 'chip shows id and status', JSON.stringify(c.chipText))
+  check(JSON.stringify(c.navigated) === '["/crew?card=t_aaa111","/crew?card=t_bbb222"]', 'chips navigate through ctx.host.navigate to /crew?card=<id>', JSON.stringify(c.navigated))
+  check(JSON.stringify(c.copies) === '["t_aaa111","t_bbb222"]', 'chips offer copyable card ids', JSON.stringify(c.copies))
+  check(c.noHost === 'ok', 'chip click is safe without ctx.host.navigate', JSON.stringify(c.noHost))
+  check(c.emptyIsNull === true, 'no cards -> nothing rendered', JSON.stringify(c.emptyIsNull))
+  check(c.forItem === 2 && c.forNone === 0, 'crewCardsFor reads item.crewCards defensively', JSON.stringify([c.forItem, c.forNone]))
+  const dc = s2.discover || {}
+  check(!dc.__error, 'DiscoverControl renders', dc.__error)
+  check(Array.isArray(dc.buttonLabels) && dc.buttonLabels.some(l => l.indexOf('Discover') >= 0), 'Discover control exposes a Discover button', JSON.stringify(dc.buttonLabels))
+}
+
+console.log('  Source safety invariants (Slice 2)')
+{
+  const lines = source.split('\n')
+  const urlLines = lines.filter(l => /https?:\/\//.test(l) && !/startsWith\('https?:\/\/'\)/.test(l))
+  check(urlLines.length === 0, 'No http(s) URL substrings outside the isSafeUrl allowlist', urlLines[0])
+  check(!/ctx\.rest\.(post|put|delete|patch)\b/.test(source), 'No ctx.rest method shorthands')
+  check(source.includes('/discover'), 'Discover posts via ctx.rest(path, { method })')
+}
+
+console.log('\n[Slice 2 web] dashboard/dist/index.js explorations, reviews, Crew links, Discover')
+
+function runWebDriver() {
+  try {
+    const raw = execSync('node ' + resolve(__dirname, '_dashboard_web_driver.mjs'), { encoding: 'utf8', timeout: 30000 }).trim()
+    return JSON.parse(raw)
+  } catch (e) {
+    return { __driverError: (e.message || '').slice(0, 800) }
+  }
+}
+const web = runWebDriver()
+check(!web.__driverError, 'Web dashboard driver executes the shipped IIFE', web.__driverError)
+{
+  check(web.registered === 'function', 'Web plugin registers its page component', web.registered)
+  const h = web.helpers || {}
+  check(h.scopeWs === 'Workspace' && h.scopeChange === 'Change: demo', 'web scope labels', JSON.stringify([h.scopeWs, h.scopeChange]))
+  check(h.verdictApproved === 'os-verdict-approved' && h.verdictRejected === 'os-verdict-rejected' && h.verdictOther === 'os-verdict-pending', 'web verdict classes', JSON.stringify(h))
+  check(JSON.stringify(h.sorted) === '["b","a"]', 'web explorations sort newest first', JSON.stringify(h.sorted))
+  const f = web.fetched || []
+  check(f[0] && f[0].url === '/api/plugins/openspec/sources/src%201/explorations/spike?scope=change%3Ademo' && !f[0].method, 'web exploration GET path', JSON.stringify(f[0]))
+  check(f[1] && f[1].url === '/api/plugins/openspec/sources/src%201/discover' && f[1].method === 'POST' && JSON.parse(f[1].body).register === true, 'web discover POST body', JSON.stringify(f[1]))
+  const r = web.reviews || {}
+  check(Array.isArray(r.badges) && r.badges.indexOf('REJECTED') >= 0 && r.badges.indexOf('APPROVED') >= 0 && r.round === true && r.buttons === 2, 'web ReviewsTab lists verdict badges and rounds', JSON.stringify(r))
+  check(String(web.reviewsEmpty).indexOf('No reviews') >= 0, 'web ReviewsTab empty state', JSON.stringify(web.reviewsEmpty))
+  const c = web.crew || {}
+  check(JSON.stringify(c.hrefs) === '["/crew?card=t_aaa111"]' && String((c.text || [])[0]).indexOf('t_aaa111 running') >= 0, 'web CrewCards link to /crew?card=<id>', JSON.stringify(c))
+  check(c.none === null, 'web CrewCards renders nothing when empty', JSON.stringify(c.none))
+  const p = web.panel || {}
+  check(p.rows === 2 && String(p.firstRow).indexOf('New') >= 0 && JSON.stringify(p.picked) === '["new"]' && p.input === 1, 'web ExplorationsPanel rows, order, select, filter', JSON.stringify(p))
+  check(String(web.panelEmpty).indexOf('No explorations') >= 0, 'web ExplorationsPanel empty state', JSON.stringify(web.panelEmpty))
+  const t = web.tabs || {}
+  check((t.tabs || []).some(x => x.indexOf('Reviews (2)') >= 0) && (t.tabs || []).some(x => x.indexOf('Explorations (1)') >= 0), 'web change detail has Reviews and Explorations tabs', JSON.stringify(t.tabs))
+  check(JSON.stringify(t.crewLinks) === '["/crew?card=t_x"]', 'web change detail shows Crew card links', JSON.stringify(t.crewLinks))
+  check(JSON.stringify(web.tabsBare) === '["Proposal"]', 'web change detail omits tabs without data', JSON.stringify(web.tabsBare))
+  const tb = web.toolbar || {}
+  check(tb.discover === true && tb.disabled === false, 'web toolbar exposes an enabled Discover button for a valid source', JSON.stringify(tb))
+  check((web.toolbarNoSource || {}).disabled === null || (web.toolbarNoSource || {}).disabled === true, 'web Discover is disabled without an active source', JSON.stringify(web.toolbarNoSource))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

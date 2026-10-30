@@ -45,6 +45,74 @@ function specPath(sourceId, path) {
   return '/sources/' + encodeURIComponent(sourceId) + '/specs?path=' + encodeURIComponent(path)
 }
 
+function explorationPath(sourceId, name, scope) {
+  return '/sources/' + encodeURIComponent(sourceId) + '/explorations/' + encodeURIComponent(name) +
+    '?scope=' + encodeURIComponent(scope || 'workspace')
+}
+
+function discoverSourcesPath(sourceId) {
+  return '/sources/' + encodeURIComponent(sourceId) + '/discover'
+}
+
+function explorationScopeLabel(scope) {
+  var s = String(scope || 'workspace')
+  if (s.indexOf('change:') === 0) return 'Change: ' + s.slice('change:'.length)
+  return 'Workspace'
+}
+
+function filterExplorations(items, query) {
+  if (!query) return items || []
+  var q = String(query).toLowerCase()
+  return (items || []).filter(function(item) {
+    return [item.title, item.name, item.scope, item.token].some(function(field) {
+      return String(field || '').toLowerCase().includes(q)
+    })
+  })
+}
+
+function sortExplorations(items) {
+  return (items || []).slice().sort(function(a, b) {
+    var da = String(a.date || '')
+    var db = String(b.date || '')
+    if (da !== db) return da < db ? 1 : -1
+    var ta = String(a.title || a.name || '').toLowerCase()
+    var tb = String(b.title || b.name || '').toLowerCase()
+    if (ta < tb) return -1
+    if (ta > tb) return 1
+    return 0
+  })
+}
+
+var VERDICT_TONE = {
+  APPROVED: '#34d399',
+  REJECTED: '#f87171',
+  PENDING: 'var(--ui-text-tertiary)',
+}
+
+function verdictTone(verdict) {
+  return VERDICT_TONE[String(verdict || '').toUpperCase()] || VERDICT_TONE.PENDING
+}
+
+function nonEmptyList(value) {
+  return Array.isArray(value) && value.length > 0
+}
+
+function changeTabKeys(data) {
+  var d = data || {}
+  var keys = []
+  if (d.proposal) keys.push('proposal')
+  if (d.tasks) keys.push('tasks')
+  if (d.design) keys.push('design')
+  if (nonEmptyList(d.specs)) keys.push('specs')
+  if (nonEmptyList(d.reviews)) keys.push('reviews')
+  if (nonEmptyList(d.explorations)) keys.push('explorations')
+  return keys
+}
+
+function crewCardsFor(item) {
+  return item && Array.isArray(item.crewCards) ? item.crewCards : []
+}
+
 function selectFirstValid(sources) {
   if (!sources || sources.length === 0) return null
   var valid = sources.filter(function(s) { return s.valid !== false })
@@ -498,6 +566,10 @@ function createApi(ctx) {
     idea: function(sourceId, name) { return ctx.rest(ideaPath(sourceId, name)) },
     specBrowser: function(sourceId, opts) { return ctx.rest(specBrowserPath(sourceId, opts)) },
     spec: function(sourceId, path) { return ctx.rest(specPath(sourceId, path)) },
+    exploration: function(sourceId, name, scope) { return ctx.rest(explorationPath(sourceId, name, scope)) },
+    discoverSources: function(sourceId, register) {
+      return ctx.rest(discoverSourcesPath(sourceId), { method: 'POST', body: { register: !!register } })
+    },
     addSource: function(path, name) {
       return ctx.rest(sourcesPath(), { method: 'POST', body: { path: path, name: name || undefined } })
     },
@@ -849,7 +921,7 @@ function DetailDrawer({ title, secondary, itemRef, canCopy, token, taskStats, on
 // Change detail drawer
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItems, onClose }) {
+function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItems, ctx, onSelectExploration, onClose }) {
   var query = useQuery({
     queryKey: ['openspec', 'change', sourceId, change.name || change.token],
     queryFn: function() { return api.change(sourceId, change.name || change.token) }
@@ -867,11 +939,23 @@ function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItem
   if (query.error) return jsx(DetailDrawer, { title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(RetryErrorState, { title: 'Failed to load change', description: query.error.message, onRetry: function() { query.refetch() } }) })
 
   var data = query.data || {}
-  var tabs = []
-  if (data.proposal) tabs.push({ key: 'proposal', label: 'Proposal', content: jsx(MarkdownView, { content: stripFrontmatter(data.proposal) }) })
-  if (data.tasks) tabs.push({ key: 'tasks', label: 'Tasks', content: jsx(TaskView, { content: stripFrontmatter(data.tasks) }) })
-  if (data.design) tabs.push({ key: 'design', label: 'Design', content: jsx(MarkdownView, { content: stripFrontmatter(data.design) }) })
-  if (data.specs && data.specs.length > 0) tabs.push({ key: 'specs', label: 'Specs', content: jsx(SpecsDetailView, { specs: data.specs }) })
+  var localExplorations = nonEmptyList(data.explorations) ? data.explorations : []
+  var tabBuilders = {
+    proposal: function() { return { key: 'proposal', label: 'Proposal', content: jsx(MarkdownView, { content: stripFrontmatter(data.proposal) }) } },
+    tasks: function() { return { key: 'tasks', label: 'Tasks', content: jsx(TaskView, { content: stripFrontmatter(data.tasks) }) } },
+    design: function() { return { key: 'design', label: 'Design', content: jsx(MarkdownView, { content: stripFrontmatter(data.design) }) } },
+    specs: function() { return { key: 'specs', label: 'Specs', content: jsx(SpecsDetailView, { specs: data.specs }) } },
+    reviews: function() { return { key: 'reviews', label: 'Reviews', content: jsx(ReviewsView, { reviews: data.reviews }) } },
+    explorations: function() {
+      var pool = (source && source.openspec && source.openspec.explorations) || localExplorations
+      return { key: 'explorations', label: 'Explorations', content: jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px' }, children: localExplorations.map(function(ex) {
+        return renderExplorationRow(ex, source, allSources, pool, onSelectExploration || function() {})
+      }) }) }
+    },
+  }
+  var tabs = changeTabKeys(data).map(function(key) { return tabBuilders[key]() })
+  var crewCards = crewCardsFor(data)
+  if (crewCards.length === 0) crewCards = crewCardsFor(change)
 
   var currentTab = activeTab || (tabs.length > 0 ? tabs[0].key : null)
 
@@ -887,11 +971,204 @@ function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItem
     token: token,
     taskStats: data.taskStats,
     onClose: onClose,
-    children: tabs.length > 0 ? jsxs(Tabs, { value: currentTab, onValueChange: setActiveTab, children: [
-      jsx(TabsList, { children: tabs.map(function(t) { return jsx(TabsTrigger, { value: t.key, children: t.label }, t.key) }) }),
-      tabs.map(function(t) { return currentTab === t.key ? jsx('div', { key: t.key, children: t.content }) : null }),
-    ] }) : jsx(EmptyState, { title: 'No artifacts', description: 'This change has no proposal, tasks, design, or spec content.' })
+    children: jsxs('div', { children: [
+      jsx(CrewCardChips, { cards: crewCards, ctx: ctx }),
+      tabs.length > 0 ? jsxs(Tabs, { value: currentTab, onValueChange: setActiveTab, children: [
+        jsx(TabsList, { children: tabs.map(function(t) { return jsx(TabsTrigger, { value: t.key, children: t.label }, t.key) }) }),
+        tabs.map(function(t) { return currentTab === t.key ? jsx('div', { key: t.key, children: t.content }) : null }),
+      ] }) : jsx(EmptyState, { title: 'No artifacts', description: 'This change has no proposal, tasks, design, or spec content.' }),
+    ] })
   })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Explorations, change reviews, Crew card chips
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function renderExplorationRow(ex, source, sources, allItems, onSelect) {
+  var itemRef = buildItemReference(source, ex, sources)
+  var canCopy = !!itemRef && hasUniqueItemToken(ex, allItems)
+  var title = ex.title || ex.name || 'Untitled exploration'
+  var onClick = function() { onSelect(Object.assign({}, ex, { _type: 'exploration' })) }
+  return jsxs('div', {
+    'data-exploration-row': ex.token || ex.name,
+    className: cn(
+      'rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) px-3 py-2 cursor-pointer',
+      'hover:border-(--ui-focus-border) hover:bg-primary/[0.06] transition-colors',
+      'focus-visible:bg-(--ui-control-hover-background)'
+    ),
+    'data-selectable-text': 'true',
+    tabIndex: 0,
+    role: 'button',
+    onClick: onClick,
+    onKeyDown: function(e) { handleActivateKey(e, onClick) },
+    children: [
+      jsxs('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }, children: [
+        jsx('div', { style: { fontWeight: 500, fontSize: '13px', color: 'var(--foreground, #e0e0e0)' }, children: title }),
+        jsx(Badge, { variant: 'outline', style: { fontSize: '10px', flexShrink: 0 }, children: explorationScopeLabel(ex.scope) }),
+      ] }),
+      jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px', minWidth: 0 }, children: [
+        ex.date ? jsx('span', { style: { fontSize: '11px', color: 'var(--muted-foreground, #888)' }, children: ex.date }) : null,
+        jsx('span', { style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--muted-foreground, #888)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }, children: ex.filename || '' }),
+        jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginLeft: 'auto', flexShrink: 0 }, children: [
+          canCopy ? jsx(CopyButton, { appearance: 'icon', text: itemRef, label: 'Copy item reference', title: itemRef, stopPropagation: true }) : null,
+          ex.token ? jsx('span', { style: { fontFamily: 'monospace', fontSize: '10px', color: 'var(--muted-foreground, #888)' }, children: ex.token }) : null,
+        ] }),
+      ] }),
+    ]
+  }, ex.token || ex.name)
+}
+
+function ExplorationsView({ source, sources, onSelectItem }) {
+  var all = (source.openspec && source.openspec.explorations) || []
+  var [filter, setFilter] = React.useState('')
+  var rows = sortExplorations(filterExplorations(all, filter))
+
+  return jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', height: '100%', overflow: 'hidden', minWidth: 0, minHeight: 0 }, children: [
+    jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '0 4px', flexShrink: 0 }, children: [
+      jsx('span', { style: { display: 'inline-flex', alignItems: 'center', color: 'var(--muted-foreground, #888)', lineHeight: 1 }, title: 'Filter', 'aria-label': 'Filter', children: jsx(Codicon, { name: 'filter', size: '0.85rem' }) }),
+      jsx(Input, { placeholder: 'title, scope, or token...', value: filter, onChange: function(e) { setFilter(e.target.value) }, style: { flex: 1 } }),
+    ] }),
+    all.length === 0
+      ? jsx(EmptyState, { title: 'No explorations', description: 'No files under openspec/workspace/explorations or a change explorations folder.' })
+      : jsx('div', { style: { flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', paddingRight: '4px' }, children: rows.map(function(ex) {
+          return renderExplorationRow(ex, source, sources, all, onSelectItem)
+        }) }),
+  ] })
+}
+
+function ExplorationBody({ api, sourceId, exploration, ctx }) {
+  var query = useQuery({
+    queryKey: ['openspec', 'exploration', sourceId, exploration.scope || 'workspace', exploration.name],
+    queryFn: function() { return api.exploration(sourceId, exploration.name, exploration.scope) }
+  })
+  if (query.isLoading) return jsx(Loader, { type: 'lemniscate-bloom' })
+  if (query.error) return jsx(RetryErrorState, { title: 'Failed to load exploration', description: query.error.message, onRetry: function() { query.refetch() } })
+
+  var data = query.data || {}
+  var scope = data.scope || exploration.scope
+  var date = data.date || exploration.date
+  var path = data.path || exploration.path
+  var cards = crewCardsFor(data)
+  if (cards.length === 0) cards = crewCardsFor(exploration)
+
+  return jsxs('div', { children: [
+    jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 12px', flexWrap: 'wrap' }, children: [
+      jsx(Badge, { variant: 'outline', style: { fontSize: '10px' }, children: explorationScopeLabel(scope) }),
+      date ? jsx('span', { style: { fontSize: '12px', color: 'var(--muted-foreground, #888)' }, children: date }) : null,
+      path ? jsx(CopyButton, { appearance: 'icon', text: path, label: 'Copy file path', title: path }) : null,
+    ] }),
+    jsx(CrewCardChips, { cards: cards, ctx: ctx }),
+    jsx(MarkdownView, { content: stripFrontmatter(data.content || '') }),
+  ] })
+}
+
+function ExplorationDetailDrawer({ api, sourceId, exploration, source, allSources, allItems, ctx, onClose }) {
+  var itemRef = buildItemReference(source, exploration, allSources)
+  var canCopy = !!itemRef && hasUniqueItemToken(exploration, allItems)
+  return jsx(DetailDrawer, {
+    title: exploration.title || exploration.name || 'Untitled exploration',
+    secondary: exploration.filename || '',
+    itemRef: itemRef,
+    canCopy: canCopy,
+    token: exploration.token || exploration.name || '',
+    onClose: onClose,
+    children: jsx(ExplorationBody, { api: api, sourceId: sourceId, exploration: exploration, ctx: ctx })
+  })
+}
+
+function ReviewsView({ reviews }) {
+  var list = Array.isArray(reviews) ? reviews : []
+  var [selected, setSelected] = React.useState(list.length - 1)
+  if (list.length === 0) return jsx(EmptyState, { title: 'No reviews', description: 'This change has no review findings.' })
+  var current = list[selected] || list[list.length - 1]
+
+  return jsxs('div', { 'data-selectable-text': 'true', style: { padding: '12px' }, children: [
+    jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '12px' }, children: list.map(function(review, i) {
+      var active = review === current
+      return jsxs('button', {
+        type: 'button',
+        'data-review-item': review.token || review.name,
+        onClick: function() { setSelected(i) },
+        className: cn(
+          'flex items-center gap-2 rounded-md border px-2 py-1 text-left cursor-pointer bg-transparent',
+          active ? 'border-(--ui-focus-border)' : 'border-(--ui-stroke-tertiary)'
+        ),
+        children: [
+          jsx(Badge, { variant: 'outline', style: { fontSize: '10px', color: verdictTone(review.verdict) }, children: review.verdict || 'PENDING' }),
+          jsx('span', { style: { fontSize: '12px', color: 'var(--foreground, #e0e0e0)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }, children: review.name }),
+          review.round != null ? jsx('span', { style: { fontSize: '11px', color: 'var(--muted-foreground, #888)' }, children: 'Round ' + review.round }) : null,
+        ]
+      }, review.token || review.name)
+    }) }),
+    jsx('div', { style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--muted-foreground, #888)', marginBottom: '4px' }, children: current.filename || '' }),
+    jsx(MarkdownView, { content: stripFrontmatter(current.content || '') }),
+  ] })
+}
+
+function CrewCardChips({ cards, ctx }) {
+  var list = Array.isArray(cards) ? cards : []
+  if (list.length === 0) return null
+  return jsx('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', padding: '4px 12px' }, children: list.map(function(card) {
+    var go = function() { return ctx && ctx.host && ctx.host.navigate ? ctx.host.navigate(card.url) : null }
+    var detail = [card.title, card.assignee, card.board].filter(Boolean).join(' · ')
+    return jsxs('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '2px' }, children: [
+      jsx('span', {
+        'data-crew-card': card.id,
+        role: 'button',
+        tabIndex: 0,
+        title: detail,
+        onClick: go,
+        onKeyDown: function(e) { handleActivateKey(e, go) },
+        className: cn('rounded-md border border-(--ui-stroke-tertiary) px-2 py-0.5 cursor-pointer hover:border-(--ui-focus-border)'),
+        style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--foreground, #e0e0e0)' },
+        children: card.id + ' ' + (card.status || '')
+      }),
+      jsx(CopyButton, { appearance: 'icon', text: card.id, label: 'Copy card id', title: card.id }),
+    ] }, card.id)
+  }) })
+}
+
+function DiscoverControl({ api, sourceId, onRegistered }) {
+  var [open, setOpen] = React.useState(false)
+  var [busy, setBusy] = React.useState(false)
+  var [result, setResult] = React.useState(null)
+  var [error, setError] = React.useState('')
+
+  function run(register) {
+    setBusy(true); setError('')
+    return api.discoverSources(sourceId, register).then(function(res) {
+      setBusy(false); setResult(res)
+      if (register && onRegistered) onRegistered(res)
+    }).catch(function(e) {
+      setBusy(false); setError(extractApiError(e))
+    })
+  }
+  function openAndPreview() { setOpen(true); setResult(null); run(false) }
+
+  var candidates = (result && result.candidates) || []
+  var fresh = candidates.filter(function(c) { return !c.alreadyRegistered })
+
+  return jsxs('span', { style: { display: 'inline-flex' }, children: [
+    jsx(Button, { variant: 'ghost', size: 'sm', style: { padding: '2px 6px', fontSize: '11px', minWidth: 'auto', flexShrink: 0, whiteSpace: 'nowrap' }, title: 'Discover OpenSpec repositories under this source', 'aria-label': 'Discover sources', onClick: openAndPreview, children: 'Discover' }),
+    open ? jsx(Dialog, { open: true, onOpenChange: function() { if (!busy) setOpen(false) }, children: jsxs(DialogContent, { style: { padding: '16px', maxWidth: '520px' }, children: [
+      jsx('h2', { style: { fontSize: '16px', fontWeight: 600, margin: '0 0 12px', color: 'var(--foreground, #e0e0e0)' }, children: 'Discover OpenSpec sources' }),
+      busy && !result ? jsx(Loader, { type: 'lemniscate-bloom' }) : null,
+      error ? jsx('div', { style: { padding: '8px 12px', background: 'var(--destructive-background, #3d1a1a)', borderRadius: '4px', fontSize: '12px', color: 'var(--destructive, #f44336)', marginBottom: '12px' }, children: error }) : null,
+      result && candidates.length === 0 ? jsx(EmptyState, { title: 'Nothing found', description: 'No child repositories with an openspec/ folder were found.' }) : null,
+      candidates.length > 0 ? jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '12px', maxHeight: '260px', overflowY: 'auto' }, children: candidates.map(function(c) {
+        return jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' }, children: [
+          jsx('span', { style: { fontWeight: 500, fontSize: '12px', color: 'var(--foreground, #e0e0e0)' }, children: c.name }),
+          jsx('span', { style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--muted-foreground, #888)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: c.path, children: c.path }),
+          c.alreadyRegistered ? jsx(Badge, { variant: 'outline', style: { fontSize: '10px' }, children: 'registered' }) : null,
+        ] }, c.path)
+      }) }) : null,
+      jsxs('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '8px' }, children: [
+        jsx(Button, { variant: 'outline', size: 'sm', onClick: function() { setOpen(false) }, disabled: busy, children: 'Close' }),
+        jsx(Button, { size: 'sm', onClick: function() { run(true) }, disabled: busy || fresh.length === 0, children: busy ? 'Working...' : 'Register ' + fresh.length + ' new' }),
+      ] }),
+    ] }) }) : null,
+  ] })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1226,7 +1503,7 @@ function WorktreeDetailView({ sourceId, file, files }) {
 // Main page
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function OpenSpecPage({ api, sessionStore }) {
+function OpenSpecPage({ api, sessionStore, ctx }) {
   var sourcesQuery = useQuery({
     queryKey: ['openspec', 'sources'],
     queryFn: function() { return api.sources() },
@@ -1389,13 +1666,16 @@ function OpenSpecPage({ api, sessionStore }) {
         onChange: setView,
         options: [
           { id: 'work', label: 'Work' },
+          { id: 'explorations', label: 'Explorations' },
           { id: 'specs', label: 'Specs' },
         ]
       }),
+      selectedSource && selectedSource.valid !== false ? jsx(DiscoverControl, { api: api, sourceId: selectedSource.id, onRegistered: function() { sourcesQuery.refetch() } }) : null,
       selectedSource && selectedSource.openspec && selectedSource.openspec.counts ? jsxs('div', { style: { display: 'flex', gap: '4px', fontSize: '10px', color: 'var(--muted-foreground, #888)' }, children: [
         selectedSource.openspec.counts.changes != null ? jsx(Badge, { variant: 'outline', children: selectedSource.openspec.counts.changes + ' changes' }) : null,
         selectedSource.openspec.counts.ideas != null ? jsx(Badge, { variant: 'outline', children: selectedSource.openspec.counts.ideas + ' ideas' }) : null,
         selectedSource.openspec.counts.specs != null ? jsx(Badge, { variant: 'outline', children: selectedSource.openspec.counts.specs + ' specs' }) : null,
+        selectedSource.openspec.counts.explorations != null ? jsx(Badge, { variant: 'outline', children: selectedSource.openspec.counts.explorations + ' explorations' }) : null,
       ] }) : null,
     ] }),
 
@@ -1414,14 +1694,17 @@ function OpenSpecPage({ api, sessionStore }) {
     jsx('div', { style: { flex: 1, overflow: 'hidden', padding: '12px 16px' }, children: selectedSource && selectedSource.valid !== false ? (
       view === 'work'
         ? jsx(WorkView, { key: selectedSource.id, api: api, source: selectedSource, sources: sources, showArchived: showArchived, onToggleArchived: handleToggleArchived, onSelectItem: onSelectItem })
-        : jsx(SpecsView, { key: selectedSource.id, api: api, sourceId: selectedSource.id })
+        : view === 'explorations'
+          ? jsx(ExplorationsView, { key: selectedSource.id, source: selectedSource, sources: sources, onSelectItem: onSelectItem })
+          : jsx(SpecsView, { key: selectedSource.id, api: api, sourceId: selectedSource.id })
     ) : selectedSource && selectedSource.valid === false ? null : jsx(EmptyState, {
       title: sources.length === 0 ? 'No sources registered' : 'Select a source',
       description: sources.length === 0 ? 'Add a source to get started.' : 'Choose a source to view its OpenSpec project.'
     }) }),
 
     // Detail drawer — synchronous gate: reject stale item from different source
-    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'change' && selectedSource && selectedSource.valid !== false ? jsx(ChangeDetailDrawer, { api: api, sourceId: selectedSourceId, change: selectedItem.item, source: selectedSource, allSources: sources, allItems: allItems, onClose: function() { setSelectedItem(null) } }) : null,
+    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'change' && selectedSource && selectedSource.valid !== false ? jsx(ChangeDetailDrawer, { api: api, sourceId: selectedSourceId, change: selectedItem.item, source: selectedSource, allSources: sources, allItems: allItems, ctx: ctx, onSelectExploration: onSelectItem, onClose: function() { setSelectedItem(null) } }) : null,
+    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'exploration' && selectedSource && selectedSource.valid !== false ? jsx(ExplorationDetailDrawer, { api: api, sourceId: selectedSourceId, exploration: selectedItem.item, source: selectedSource, allSources: sources, allItems: (selectedSource.openspec && selectedSource.openspec.explorations) || [], ctx: ctx, onClose: function() { setSelectedItem(null) } }) : null,
     selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'idea' && selectedSource && selectedSource.valid !== false ? jsx(IdeaDetailDrawer, { api: api, sourceId: selectedSourceId, idea: selectedItem.item, source: selectedSource, allSources: sources, allItems: allItems, onClose: function() { setSelectedItem(null) } }) : null,
 
     // Source add/edit dialog
@@ -1456,13 +1739,13 @@ var plugin = {
         id: 'page',
         area: ROUTES_AREA,
         data: { path: '/openspec' },
-        render: function() { return jsx(OpenSpecPage, { api: api, sessionStore: sessionStore }) }
+        render: function() { return jsx(OpenSpecPage, { api: api, sessionStore: sessionStore, ctx: ctx }) }
       },
       {
         id: 'nav',
         area: SIDEBAR_NAV_AREA,
         order: 50,
-        data: { codicon: 'list-tree', label: 'OpenSpec', path: '/openspec' }
+        data: { codicon: 'list-tree', label: 'OpenSpec', path: '/openspec', asTile: true }
       }
     ])
   }
@@ -1475,6 +1758,22 @@ export const __test = Object.freeze({
   ideaPath: ideaPath,
   specBrowserPath: specBrowserPath,
   specPath: specPath,
+  explorationPath: explorationPath,
+  discoverSourcesPath: discoverSourcesPath,
+  explorationScopeLabel: explorationScopeLabel,
+  filterExplorations: filterExplorations,
+  sortExplorations: sortExplorations,
+  verdictTone: verdictTone,
+  changeTabKeys: changeTabKeys,
+  crewCardsFor: crewCardsFor,
+  ExplorationsView: ExplorationsView,
+  ExplorationDetailDrawer: ExplorationDetailDrawer,
+  ExplorationBody: ExplorationBody,
+  ReviewsView: ReviewsView,
+  CrewCardChips: CrewCardChips,
+  DiscoverControl: DiscoverControl,
+  ChangeDetailDrawer: ChangeDetailDrawer,
+  OpenSpecPage: OpenSpecPage,
   selectFirstValid: selectFirstValid,
   normalizeStatus: normalizeStatus,
   groupByStatus: groupByStatus,

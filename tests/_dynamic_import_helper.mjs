@@ -719,7 +719,7 @@ if (__test) {
         results.sourceMutation.sourcesCallMethod = sourcesCall && sourcesCall.opts ? sourcesCall.opts.method : undefined
         const apiKeys = Object.keys(mutApi).sort()
         results.sourceMutation.mutationMethods = ['addSource', 'updateSource', 'initSource', 'removeSource'].filter((k) => apiKeys.includes(k))
-        results.sourceMutation.allowlistExact = JSON.stringify(apiKeys) === JSON.stringify(['addSource', 'change', 'idea', 'initSource', 'removeSource', 'sources', 'spec', 'specBrowser', 'updateSource'].sort())
+        results.sourceMutation.allowlistExact = JSON.stringify(apiKeys) === JSON.stringify(['addSource', 'change', 'discoverSources', 'exploration', 'idea', 'initSource', 'removeSource', 'sources', 'spec', 'specBrowser', 'updateSource'].sort())
         results.sourceMutation.noGenericRequest = !apiKeys.includes('request')
       }
     } catch (e) {

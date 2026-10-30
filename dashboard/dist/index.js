@@ -51,6 +51,12 @@
   }
   function getChange(sid, name) { return fetchJSON(BASE + "/sources/" + encodeURIComponent(sid) + "/changes/" + encodeURIComponent(name)); }
   function getIdea(sid, name) { return fetchJSON(BASE + "/sources/" + encodeURIComponent(sid) + "/ideas/" + encodeURIComponent(name)); }
+  function getExploration(sid, name, scope) {
+    return fetchJSON(BASE + "/sources/" + encodeURIComponent(sid) + "/explorations/" + encodeURIComponent(name) + "?scope=" + encodeURIComponent(scope || "workspace"));
+  }
+  function discoverSources(sid, register) {
+    return fetchJSON(BASE + "/sources/" + encodeURIComponent(sid) + "/discover", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ register: !!register }) });
+  }
   function getSpec(sid, path) { return fetchJSON(BASE + "/sources/" + encodeURIComponent(sid) + "/specs?path=" + encodeURIComponent(path)); }
   function getSpecBrowser(sid, params) {
     var qs = new URLSearchParams();
@@ -190,10 +196,140 @@
   var STATUS_TONE = { ideas: "os-tone-ideas", draft: "os-tone-draft", todo: "os-tone-todo", in_progress: "os-tone-progress", done: "os-tone-done", archived: "os-tone-archived" };
   var COLUMN_ORDER = ["ideas", "draft", "todo", "in_progress", "done", "archived"];
 
+  // ── Explorations / reviews / Crew linkage helpers ────────────────────
+  var VERDICT_CLASS = { APPROVED: "os-verdict-approved", REJECTED: "os-verdict-rejected", PENDING: "os-verdict-pending" };
+  function verdictClass(v) { return VERDICT_CLASS[String(v || "").toUpperCase()] || VERDICT_CLASS.PENDING; }
+  function scopeLabel(scope) {
+    var s = String(scope || "workspace");
+    return s.indexOf("change:") === 0 ? "Change: " + s.slice(7) : "Workspace";
+  }
+  function nonEmpty(list) { return Array.isArray(list) && list.length > 0; }
+  function sortExplorations(items) {
+    return (items || []).slice().sort(function (a, b) {
+      var da = String(a.date || ""), db = String(b.date || "");
+      if (da !== db) return da < db ? 1 : -1;
+      return String(a.title || a.name || "").localeCompare(String(b.title || b.name || ""));
+    });
+  }
+
+  function CrewCards(_ref) {
+    var cards = _ref.cards;
+    if (!nonEmpty(cards)) return null;
+    return h("div", { className: "os-crew-cards" }, cards.map(function (c) {
+      return h("span", { key: c.id, className: "os-crew-card" },
+        h("a", { className: "os-crew-link", href: c.url, title: [c.title, c.assignee, c.board].filter(Boolean).join(" · ") }, c.id + " " + (c.status || "")),
+        h(CopyChip, { text: c.id })
+      );
+    }));
+  }
+
+  function ReviewsTab(_ref) {
+    var reviews = _ref.reviews;
+    var _i = useState(Math.max(0, (reviews || []).length - 1));
+    var idx = _i[0], setIdx = _i[1];
+    if (!nonEmpty(reviews)) return h("p", { className: "os-empty" }, "No reviews.");
+    var cur = reviews[idx] || reviews[reviews.length - 1];
+    return h("div", { className: "os-reviews" },
+      h("div", { className: "os-review-list" }, reviews.map(function (r, i) {
+        return h("button", { key: r.token || r.name, className: cn("os-review-item", r === cur && "os-review-item-active"), onClick: function () { setIdx(i); } },
+          h(Badge, { className: cn("os-verdict", verdictClass(r.verdict)) }, r.verdict || "PENDING"),
+          h("span", { className: "os-review-name" }, r.name),
+          r.round != null ? h("span", { className: "os-review-round" }, "Round " + r.round) : null
+        );
+      })),
+      h("div", { className: "os-review-file" }, cur.filename),
+      h(Markdown, { md: cur.content })
+    );
+  }
+
+  function ExplorationList(_ref) {
+    var items = _ref.items, source = _ref.source, onSelect = _ref.onSelect;
+    return h("div", { className: "os-expl-list" }, sortExplorations(items).map(function (ex) {
+      return h("button", { key: ex.token || ex.name, className: "os-expl-row", onClick: function () { onSelect(ex); } },
+        h("span", { className: "os-expl-title" }, ex.title || ex.name),
+        h(Badge, { variant: "outline" }, scopeLabel(ex.scope)),
+        ex.date ? h("span", { className: "os-expl-date" }, ex.date) : null,
+        h("span", { className: "os-expl-file" }, ex.filename),
+        ex.token ? h("span", { className: "os-expl-token", title: "Copy: " + source.name + "/" + ex.token,
+          onClick: function (e) { e.stopPropagation(); navigator.clipboard.writeText(source.name + "/" + ex.token); } }, ex.token) : null
+      );
+    }));
+  }
+
+  function ExplorationsPanel(_ref) {
+    var source = _ref.source, onSelect = _ref.onSelect;
+    var all = (source.openspec && source.openspec.explorations) || [];
+    var _f = useState("");
+    var q = _f[0], setQ = _f[1];
+    var needle = q.trim().toLowerCase();
+    var rows = !needle ? all : all.filter(function (ex) {
+      return [ex.title, ex.name, ex.scope, ex.token].some(function (v) { return String(v || "").toLowerCase().indexOf(needle) >= 0; });
+    });
+    if (!all.length) return h("p", { className: "os-empty" }, "No explorations found.");
+    return h("div", { className: "os-explorations" },
+      h("div", { className: "os-board-filter" },
+        h(Input, { placeholder: "Filter by title, scope, or token…", value: q, onChange: function (e) { setQ(e.target.value); }, className: "os-filter-input" })),
+      rows.length ? h(ExplorationList, { items: rows, source: source, onSelect: onSelect }) : h("p", { className: "os-empty" }, "No explorations match \"" + q + "\"")
+    );
+  }
+
+  function ExplorationDialog(_ref) {
+    var source = _ref.source, item = _ref.item, onClose = _ref.onClose;
+    var _d = useState(null), _l = useState(true), _e = useState("");
+    var detail = _d[0], setDetail = _d[1], loading = _l[0], setLoading = _l[1], err = _e[0], setErr = _e[1];
+    useEffect(function () {
+      setLoading(true); setErr(""); setDetail(null);
+      getExploration(source.id, item.name, item.scope).then(function (d) { setDetail(d); setLoading(false); }).catch(function (e) { setErr(apiErr(e)); setLoading(false); });
+    }, [source.id, item.name, item.scope]);
+    var data = detail || item;
+    return h(Modal, { title: item.title || item.name, onClose: onClose, wide: true },
+      h("div", { className: "os-detail-chip" },
+        h(CopyChip, { text: source.name + "/" + item.token }),
+        h(Badge, { variant: "outline" }, scopeLabel(data.scope)),
+        data.date ? h("span", { className: "os-expl-date" }, data.date) : null,
+        data.path ? h(CopyChip, { text: data.path }) : null),
+      h(CrewCards, { cards: (detail && detail.crewCards) || item.crewCards }),
+      loading ? h("p", { className: "os-empty" }, "Loading…") :
+        err ? h("p", { className: "os-err" }, err) :
+          h(Markdown, { md: detail && detail.content })
+    );
+  }
+
+  function DiscoverDialog(_ref) {
+    var source = _ref.source, onClose = _ref.onClose, onDone = _ref.onDone;
+    var _r = useState(null), _b = useState(true), _e = useState("");
+    var result = _r[0], setResult = _r[1], busy = _b[0], setBusy = _b[1], err = _e[0], setErr = _e[1];
+    function run(register) {
+      setBusy(true); setErr("");
+      return discoverSources(source.id, register).then(function (res) {
+        setResult(res); setBusy(false);
+        if (register && onDone) onDone(res);
+      }).catch(function (e) { setErr(apiErr(e)); setBusy(false); });
+    }
+    useEffect(function () { run(false); }, [source.id]);
+    var candidates = (result && result.candidates) || [];
+    var fresh = candidates.filter(function (c) { return !c.alreadyRegistered; });
+    return h(Modal, { title: "Discover OpenSpec sources", onClose: onClose },
+      busy && !result ? h("p", { className: "os-empty" }, "Scanning…") : null,
+      err ? h("p", { className: "os-err" }, err) : null,
+      result && !candidates.length ? h("p", { className: "os-empty" }, "No child repositories with an openspec/ folder were found.") : null,
+      candidates.length ? h("div", { className: "os-discover-list" }, candidates.map(function (c) {
+        return h("div", { key: c.path, className: "os-discover-row" },
+          h("span", { className: "os-discover-name" }, c.name),
+          h("span", { className: "os-discover-path", title: c.path }, c.path),
+          c.alreadyRegistered ? h(Badge, { variant: "outline" }, "registered") : null);
+      })) : null,
+      h("div", { className: "os-dialog-actions" },
+        h(Button, { variant: "outline", onClick: onClose, disabled: busy }, "Close"),
+        h(Button, { onClick: function () { run(true); }, disabled: busy || !fresh.length }, busy ? "Working…" : "Register " + fresh.length + " new")
+      )
+    );
+  }
+
   // ── Source toolbar ───────────────────────────────────────────────────
   function Toolbar(_ref5) {
     var sources = _ref5.sources, activeId = _ref5.activeId, onSelect = _ref5.onSelect;
-    var onRefresh = _ref5.onRefresh, onAdd = _ref5.onAdd, onEdit = _ref5.onEdit, onRemove = _ref5.onRemove;
+    var onRefresh = _ref5.onRefresh, onAdd = _ref5.onAdd, onEdit = _ref5.onEdit, onRemove = _ref5.onRemove, onDiscover = _ref5.onDiscover;
     var active = sources.find(function (s) { return s.id === activeId; });
     return h("div", { className: "os-toolbar" },
       h(Label, { htmlFor: "os-project" }, "Project"),
@@ -203,6 +339,7 @@
       ),
       h("button", { className: "os-icon-btn", onClick: onRefresh, title: "Refresh", disabled: sources.length === 0 }, h(Icon, { d: ICO.refresh })),
       h("div", { className: "os-toolbar-actions" },
+        h(Button, { variant: "outline", size: "sm", onClick: onDiscover, disabled: !active || !active.valid, title: "Discover OpenSpec repositories under this source" }, "Discover"),
         h("button", { className: "os-icon-btn", onClick: onEdit, title: "Edit source", disabled: !active }, h(Icon, { d: ICO.edit })),
         h("button", { className: "os-icon-btn", onClick: onRemove, title: "Remove source", disabled: !active }, h(Icon, { d: ICO.trash })),
         h("button", { className: "os-icon-btn", onClick: onAdd, title: "Add source" }, h(Icon, { d: ICO.plus }))
@@ -335,7 +472,7 @@
 
   // ── Change / Idea detail dialog ──────────────────────────────────────
   function DetailDialog(_ref8) {
-    var source = _ref8.source, item = _ref8.item, onClose = _ref8.onClose, anchor = _ref8.anchor, onTabChange = _ref8.onTabChange;
+    var source = _ref8.source, item = _ref8.item, onClose = _ref8.onClose, anchor = _ref8.anchor, onTabChange = _ref8.onTabChange, onSelectExploration = _ref8.onSelectExploration;
     var _d = useState(null), _l = useState(true), _e2 = useState("");
     var detail = _d[0], setDetail = _d[1], loading = _l[0], setLoading = _l[1], err = _e2[0], setErr = _e2[1];
     var isIdea = item.status === "ideas";
@@ -349,7 +486,7 @@
       loading ? h("p", { className: "os-empty" }, "Loading…") :
         err ? h("p", { className: "os-err" }, err) :
           isIdea ? h(Markdown, { md: detail && detail.content }) :
-            detail ? h(ChangeDetailTabs, { detail: detail, anchor: anchor, onTabChange: onTabChange }) : null
+            detail ? h(ChangeDetailTabs, { detail: detail, anchor: anchor, onTabChange: onTabChange, source: source, onSelectExploration: onSelectExploration }) : null
     );
   }
   // ── Task parser ─────────────────────────────────────────────────────
@@ -408,12 +545,14 @@
   }
 
   function ChangeDetailTabs(_ref9) {
-    var detail = _ref9.detail, anchor = _ref9.anchor, onTabChange = _ref9.onTabChange;
+    var detail = _ref9.detail, anchor = _ref9.anchor, onTabChange = _ref9.onTabChange, source = _ref9.source, onSelectExploration = _ref9.onSelectExploration;
     var tabs = [];
     if (detail.proposal) tabs.push(["proposal", "Proposal"]);
     if (detail.tasks) tabs.push(["tasks", "Tasks"]);
     if (detail.design) tabs.push(["design", "Design"]);
     if (detail.specs && detail.specs.length) tabs.push(["specs", "Specs (" + detail.specs.length + ")"]);
+    if (nonEmpty(detail.reviews)) tabs.push(["reviews", "Reviews (" + detail.reviews.length + ")"]);
+    if (nonEmpty(detail.explorations)) tabs.push(["explorations", "Explorations (" + detail.explorations.length + ")"]);
     if (!tabs.length) return h("p", { className: "os-empty" }, "No documents found.");
     var validAnchor = anchor && tabs.some(function (t) { return t[0] === anchor; });
     var initialTab = validAnchor ? anchor : tabs[0][0];
@@ -429,10 +568,15 @@
     }
     var content = activeTab === "specs"
       ? h(ChangeSpecsView, { specs: detail.specs })
+      : activeTab === "reviews"
+        ? h(ReviewsTab, { reviews: detail.reviews })
+        : activeTab === "explorations"
+          ? h(ExplorationList, { items: detail.explorations, source: source, onSelect: onSelectExploration || function () {} })
       : activeTab === "tasks"
         ? h(TasksView, { md: detail[activeTab], stats: detail.taskStats })
         : h(Markdown, { md: detail[activeTab] });
     return h("div", { className: "os-tabs" },
+      h(CrewCards, { cards: detail.crewCards }),
       h("div", { className: "os-tabs-bar" }, tabs.map(function (t) {
         return h("button", {
           key: t[0], className: cn("os-tab-btn", activeTab === t[0] && "os-tab-btn-active"),
@@ -889,8 +1033,9 @@
     var loading = _l3[0], setLoading = _l3[1], err = _e4[0], setErr = _e4[1];
     var _dlg = useState(null), _anchor = useState({ project: null, token: null });
     var dlg = _dlg[0], setDlg = _dlg[1], anchor = _anchor[0], setAnchor = _anchor[1];
-    var _view = useState("board"), _selItem = useState(null);
+    var _view = useState("board"), _selItem = useState(null), _selEx = useState(null), _disc = useState(false);
     var view = _view[0], setView = _view[1], selItem = _selItem[0], setSelItem = _selItem[1];
+    var selExploration = _selEx[0], setSelExploration = _selEx[1], discoverOpen = _disc[0], setDiscoverOpen = _disc[1];
 
     function loadSources(silentAfter) {
       if (!silentAfter) setLoading(true);
@@ -982,7 +1127,7 @@
       h("div", { className: "os-page" },
       h(Toolbar, {
         sources: sources, activeId: activeId, onSelect: selectSource,
-        onRefresh: function () { loadSources(true); }, onAdd: onAdd, onEdit: onEdit, onRemove: onRemove,
+        onRefresh: function () { loadSources(true); }, onAdd: onAdd, onEdit: onEdit, onRemove: onRemove, onDiscover: function () { setDiscoverOpen(true); },
       }),
       err ? h("p", { className: "os-err" }, err) : null,
       sources.length === 0 ? h("div", { className: "os-empty-state" },
@@ -991,6 +1136,8 @@
       ) : null,
       active && active.valid ? h("div", { className: "os-view-switch" },
         h(Button, { variant: view === "board" ? "default" : "outline", size: "sm", onClick: function () { setView("board"); } }, "Changes"),
+        h(Button, { variant: view === "explorations" ? "default" : "outline", size: "sm", onClick: function () { setView("explorations"); } },
+          "Explorations" + (active.openspec && active.openspec.counts && active.openspec.counts.explorations != null ? " (" + active.openspec.counts.explorations + ")" : "")),
         h(Button, { variant: view === "specs" ? "default" : "outline", size: "sm", onClick: function () { setView("specs"); } }, "Specs")
       ) : null,
       active && !active.valid ? h("div", { className: "os-invalid-state" },
@@ -1002,8 +1149,11 @@
         }, h(Icon, { d: ICO.plus, size: 14 }), " Initialize OpenSpec") : null
       ) : null,
       active && active.valid && view === "board" ? h(Board, { source: active, onSelectItem: selectItem }) : null,
+      active && active.valid && view === "explorations" ? h(ExplorationsPanel, { source: active, onSelect: setSelExploration }) : null,
       active && active.valid && view === "specs" ? h(SpecsView, { source: active, anchorToken: anchor.token, onSelectToken: selectSpec }) : null,
-      selItem && active ? h(DetailDialog, { source: active, item: selItem, onClose: closeItem, anchor: anchor.anchor, onTabChange: onTabChange }) : null,
+      selItem && active ? h(DetailDialog, { source: active, item: selItem, onClose: closeItem, anchor: anchor.anchor, onTabChange: onTabChange, onSelectExploration: setSelExploration }) : null,
+      selExploration && active ? h(ExplorationDialog, { source: active, item: selExploration, onClose: function () { setSelExploration(null); } }) : null,
+      discoverOpen && active ? h(DiscoverDialog, { source: active, onClose: function () { setDiscoverOpen(false); }, onDone: function () { loadSources(true); } }) : null,
       dlg ? h(SourceDialog, {
         mode: dlg.mode, initialPath: dlg.path, initialName: dlg.name, activeId: dlg.activeId,
         onClose: function () { setDlg(null); }, onSaved: onSaved,

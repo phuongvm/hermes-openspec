@@ -86,3 +86,33 @@ The plugin SHALL provide tools that map directly to OpenSpec list/show/status/in
 - **WHEN** an agent calls `openspec_instructions` for a known artifact
 - **THEN** the tool returns `ok: true` with template-backed guidance for that artifact instead of failing only because no change exists
 
+
+### Requirement: Public artifact reference grammar
+`openspec_context` SHALL accept `<source>` or `<source>/<ref>` where `<ref>` is a token `os_<6hex>`, a kind-qualified literal (`change:`, `spec:`, `idea:`, `exploration:<stem>[@<change>]`, `review:<stem>@<change>`) or an unqualified literal, and SHALL resolve it to exactly one artifact across all kinds and scopes.
+
+#### Scenario: Exploration and review resolution
+- **WHEN** an agent resolves a token, `exploration:<stem>@<change>` or `review:<stem>@<change>`
+- **THEN** the tool returns `ok: true` with an `exploration` or `review` object including `path` and `content`
+
+#### Scenario: Collision fails closed
+- **WHEN** an unqualified reference matches more than one artifact
+- **THEN** the tool returns `ok: false`, `error: "ambiguous"` and `candidates` listing each `kind` and qualified `ref`, with no content
+
+#### Scenario: Malformed reference
+- **WHEN** the reference contains a path separator, `..` or an unknown qualifier
+- **THEN** the tool returns `ok: false` with `error: "invalid_ref"` and reads no file
+
+### Requirement: Cross-platform CLI binary resolution
+The plugin SHALL resolve the `openspec` executable through one ordered ladder shared by agent tools and the dashboard API: `OPENSPEC_BIN`, `PATH`, `%APPDATA%/npm`, `%NVM_SYMLINK%`, `C:/nvm4w/nodejs` (Windows), then `~/.npm-global/bin`.
+
+#### Scenario: Stripped PATH on Windows
+- **GIVEN** `OPENSPEC_BIN` is unset and `PATH` does not contain `openspec`
+- **WHEN** an npm or nvm4w `openspec.cmd` shim exists on the ladder
+- **THEN** the resolver returns the shim and CLI-backed tools run through it
+
+### Requirement: Configurable bundled skill registration
+The plugin SHALL honor `plugins.entries.openspec.settings.register_bundled_skills` (`auto`, `true`, `false`) with `OPENSPEC_REGISTER_BUNDLED_SKILLS` taking precedence, and in `auto` mode SHALL skip a bundled skill whose name already exists under `<hermes_home>/skills/` or `skills.external_dirs`.
+
+#### Scenario: Modes
+- **WHEN** the mode is `auto`, `true` or `false`
+- **THEN** duplicates are skipped, all skills are registered, or none are registered, and the tools are registered in every mode
