@@ -22,11 +22,12 @@ const names = [
 const sdkShim = names.map(n => 'export const ' + n + '=(...a)=>a').join(';')
   + ';export const useQuery=(o)=>globalThis.__uq(o)'
   + ';export function cn(...a){ return a.filter(Boolean).join(" ") }'
+  + ';export const host={navigate(u){if(globalThis.__sdkNav)globalThis.__sdkNav.push(u)}}'
   + ';export const ROUTES_AREA="routes"'
   + ';export const SIDEBAR_NAV_AREA="sidebar.nav"'
   + ';export default {}'
 const reactShim = 'export function useState(v){return[v,function(){}]};'
-  + 'export function useEffect(f,d){return undefined};'
+  + 'export function useEffect(f,d){if(globalThis.__effects)globalThis.__effects.push(f);return undefined};'
   + 'export function useRef(v){return{current:v}};'
   + 'export function useCallback(f,d){return f};'
   + 'export function useMemo(f,d){return f()};'
@@ -42,8 +43,10 @@ const sdk = await import(sdkUrl)
 
 // useQuery fixture: globalThis.__fixtures maps queryKey[1] ('sources'|'change'|'exploration'|...) to a result.
 globalThis.__fixtures = {}
+globalThis.__uqOpts = {}
 globalThis.__uq = function(o) {
   const key = o && o.queryKey && o.queryKey[1]
+  if (key) globalThis.__uqOpts[key] = o
   const fx = globalThis.__fixtures[key]
   if (fx === undefined) return { data: undefined, isLoading: false, error: null, refetch() {} }
   return Object.assign({ isLoading: false, error: null, refetch() {} }, fx)
@@ -259,7 +262,7 @@ R.register = safe(() => {
   plugin.register({ registerMany(arr) { arr.forEach(c => contribs.push(c)) }, rest() { return Promise.resolve({}) } })
   const nav = contribs.find(c => c.area === 'sidebar.nav')
   const route = contribs.find(c => c.area === 'routes')
-  return { nav: nav && nav.data, route: route && route.data }
+  return { nav: nav && nav.data, route: route && route.data, routeTitle: route && route.title }
 })
 
 // ── Crew linkage + Discover (task 3.3) ─────────────────────────────────────
@@ -297,6 +300,134 @@ R.discover = safe(() => {
   const node = t.DiscoverControl({ api, sourceId: 'src-1', onRegistered() {} })
   const buttons = find(node, n => n.component === sdk.Button)
   return { buttonLabels: buttons.map(b => texts(b)), disabled: buttons.map(b => !!b.props.disabled) }
+})
+
+// ── Slice 3 UI probes ──────────────────────────────────────────────────────
+R.slice3 = safe(() => {
+  // 1. Polling intervals recorded on sources + change queries
+  const sourcesRefetch = globalThis.__uqOpts.sources && globalThis.__uqOpts.sources.refetchInterval
+  const changeRefetch = globalThis.__uqOpts.change && globalThis.__uqOpts.change.refetchInterval
+
+  // 2. Hash promotion: #/openspec -> host.navigate('/openspec'); #/other -> no navigation
+  globalThis.__sdkNav = []
+  globalThis.__effects = []
+  globalThis.window = { location: { hash: '#/openspec' } }
+  t.OpenSpecPage({ api: {}, sessionStore: { selectedSourceId: 'src-1', showArchived: true } })
+  globalThis.__effects.forEach(fn => fn())
+  const hashPromoted = globalThis.__sdkNav.slice()
+
+  globalThis.__sdkNav = []
+  globalThis.__effects = []
+  globalThis.window = { location: { hash: '#/settings' } }
+  t.OpenSpecPage({ api: {}, sessionStore: { selectedSourceId: 'src-1', showArchived: true } })
+  globalThis.__effects.forEach(fn => fn())
+  const nonMatchNav = globalThis.__sdkNav.slice()
+  delete globalThis.window
+
+  // 3. Board swimlane promotion + active-first sorting + radar attributes (alpha vs beta scenario)
+  const alpha = { name: 'alpha', token: 'os_alpha', title: 'Alpha', status: 'todo', sequence: { position: 10 }, taskStats: { done: 0, total: 7 }, crewCards: [{ id: 't_run1', status: 'running', title: 'Impl', url: '/crew?card=t_run1' }] }
+  const beta = { name: 'beta', token: 'os_beta', title: 'Beta', status: 'in_progress', sequence: { position: 1 }, taskStats: { done: 2, total: 5 }, crewCards: [{ id: 't_done1', status: 'done', title: 'Done', url: '/crew?card=t_done1' }] }
+  const gamma = { name: 'gamma', token: 'os_gamma', title: 'Gamma', status: 'draft', sequence: { position: 2 }, crewCards: [{ id: 't_rev1', status: 'review', title: 'Rev', url: '/crew?card=t_rev1' }] }
+  const grouped = t.groupByStatus([beta, gamma, alpha], true)
+  const inProgSorted = t.sortItems(grouped['in-progress']).map(i => i.name)
+  const cardAlpha = t.BoardCard({ item: alpha, source: SRC, allSources: [SRC], allItems: [alpha, beta, gamma], onSelect() {} })
+  const cardBeta = t.BoardCard({ item: beta, source: SRC, allSources: [SRC], allItems: [alpha, beta, gamma], onSelect() {} })
+  const cardGamma = t.BoardCard({ item: gamma, source: SRC, allSources: [SRC], allItems: [alpha, beta, gamma], onSelect() {} })
+
+  // 4. DetailDrawer: clamp bounds, resize handle, pointer drag, storage persistence, disambiguated Checklist + Crew badges
+  const clamp = [t.clampDrawerWidth(100), t.clampDrawerWidth(540), t.clampDrawerWidth(2000), t.clampDrawerWidth(undefined),
+                 t.clampSpecsSidebarWidth(50), t.clampSpecsSidebarWidth(260), t.clampSpecsSidebarWidth(900), t.clampSpecsSidebarWidth(null)]
+  const fiveCards = [
+    { id: 'c1', status: 'done', url: '/crew?card=c1' },
+    { id: 'c2', status: 'done', url: '/crew?card=c2' },
+    { id: 'c3', status: 'done', url: '/crew?card=c3' },
+    { id: 'c4', status: 'running', url: '/crew?card=c4' },
+    { id: 'c5', status: 'todo', url: '/crew?card=c5' },
+  ]
+  const widthEvents = []
+  const dd = t.DetailDrawer({
+    title: 'Demo', secondary: 'demo', itemRef: 'workspaces/os_e80720', canCopy: true, token: 'os_e80720',
+    taskStats: { done: 0, total: 7 }, crewCards: fiveCards, width: 640,
+    onWidthChange: (w, commit) => widthEvents.push([w, commit]), onClose() {}, children: null,
+  })
+  const sash = find(dd, n => n.props && n.props['data-drawer-resize-handle'] === 'true')[0]
+  // Simulate pointer drag left by 80px -> 640 + 80 = 720, then double-click reset -> 540
+  const listeners = {}
+  globalThis.window = {
+    addEventListener(ev, fn) { listeners[ev] = fn },
+    removeEventListener(ev) { delete listeners[ev] },
+  }
+  sash.props.onPointerDown({ clientX: 500, preventDefault() {} })
+  listeners.pointermove && listeners.pointermove({ clientX: 420 })
+  listeners.pointerup && listeners.pointerup({ clientX: 420 })
+  sash.props.onDoubleClick()
+  sash.props.onKeyDown({ key: 'ArrowLeft', preventDefault() {} })
+  delete globalThis.window
+  const ddBadges = find(dd, n => n.component === sdk.Badge).map(b => texts(b))
+  const ddRef = find(dd, n => n.props && n.props['data-drawer-ref'] != null).map(n => texts(n))
+
+  // Stored drawerWidth & specsSidebarWidth read through ctx.storage
+  const saved = { drawerWidth: 700, specsSidebarWidth: 320 }
+  const storageCtx = { storage: { get: (k, fb) => (k in saved ? saved[k] : fb), set: (k, v) => { saved[k] = v } } }
+  globalThis.__fixtures.specBrowser = { data: { files: [{ path: 'a/spec.md', status: 'current' }], branch: 'main' } }
+  const origUq = globalThis.__uq
+  globalThis.__uq = (o) => o.queryKey[1] === 'spec-browser' ? globalThis.__fixtures.specBrowser : origUq(o)
+  const specsNode = t.SpecsView({ api: {}, sourceId: 'src-1', ctx: storageCtx })
+  globalThis.__uq = origUq
+  const specsSidebar = find(specsNode, n => n.props && n.props['data-specs-sidebar'] === 'true')[0]
+  const specsSash = find(specsNode, n => n.props && n.props['data-specs-resize-handle'] === 'true')[0]
+  specsSash && specsSash.props.onKeyDown({ key: 'ArrowRight', preventDefault() {} })
+
+  // 5. Wrapping 6-tab TabsList + exploration row title & nowrap date
+  const changeNode = t.ChangeDetailDrawer({ api: {}, sourceId: 'src-1', change: SRC.openspec.changes[0], source: SRC, allSources: [SRC], allItems: SRC.openspec.changes, ctx: storageCtx, width: 700, onClose() {} })
+  const tabsList = find(changeNode, n => n.component === sdk.TabsList)[0]
+  const exRow = t.renderExplorationRow(
+    { name: 'long', token: 'os_l1', title: 'Full Width Title', scope: 'change:very-long-change-slug-that-used-to-crush-titles', date: '2026-10-30', filename: '2026-10-30-long.md' },
+    SRC, [SRC], [], () => {}
+  )
+  const dateNode = find(exRow, n => n.props && n.props['data-exploration-date'] === 'true')[0]
+  const titleNode = find(exRow, n => n.props && n.props['data-exploration-title'] === 'true')[0]
+
+  // 6. 20-ticket CrewCardChips collapsed by default + SDK host.navigate when ctx.host is absent
+  const twenty = Array.from({ length: 20 }, (_, i) => ({
+    id: 't_' + String(i + 1).padStart(2, '0'),
+    title: 'Ticket ' + (i + 1),
+    status: ['running', 'review', 'blocked', 'todo', 'done'][i % 5],
+    assignee: 'coder', board: 'crew', url: '/crew?card=t_' + String(i + 1).padStart(2, '0'),
+  }))
+  const collapsed20 = t.CrewCardChips({ cards: twenty, ctx: {} })
+  const expanded20 = t.CrewCardChips({ cards: twenty, ctx: {}, defaultOpen: true })
+  globalThis.__sdkNav = []
+  const firstChip = find(expanded20, n => n.props && n.props['data-crew-card'] != null)[0]
+  firstChip && firstChip.props.onClick()
+  const listBox = find(expanded20, n => n.props && n.props['data-crew-list'] === 'true')[0]
+
+  return {
+    sourcesRefetch, changeRefetch,
+    hashPromoted, nonMatchNav,
+    inProgSorted,
+    alphaRadar: cardAlpha.props['data-radar'], alphaClass: cardAlpha.props.className,
+    betaRadar: cardBeta.props['data-radar'] || null, betaClass: cardBeta.props.className,
+    gammaRadar: cardGamma.props['data-radar'], gammaClass: cardGamma.props.className,
+    alphaPills: find(cardAlpha, n => n.component === t.CardCrewPills).length === 1 ? texts(t.CardCrewPills({ item: alpha })) : '',
+    clamp,
+    ddWidth: dd.props.style.width,
+    sashRole: sash && sash.props.role, sashOrient: sash && sash.props['aria-orientation'],
+    widthEvents,
+    ddBadges, ddRef,
+    specsSidebarW: specsSidebar && specsSidebar.props.style.width,
+    specsSashExists: !!specsSash,
+    savedAfterKey: saved.specsSidebarWidth,
+    tabsWrap: tabsList && tabsList.props.style && tabsList.props.style.flexWrap,
+    tabLabels: find(changeNode, n => n.component === sdk.TabsTrigger).map(n => texts(n)),
+    dateNowrap: dateNode && dateNode.props.style && dateNode.props.style.whiteSpace,
+    titleFullWidth: !!(titleNode && titleNode.props.style && titleNode.props.style.flex === 1),
+    collapsed20ListCount: find(collapsed20, n => n.props && n.props['data-crew-list'] === 'true').length,
+    collapsed20Summary: texts(find(collapsed20, n => n.props && n.props['data-crew-summary'] === 'true')[0]),
+    expanded20Cards: find(expanded20, n => n.props && n.props['data-crew-card'] != null).length,
+    expanded20MaxH: listBox && listBox.props.style && listBox.props.style.maxHeight,
+    sdkHostNav: globalThis.__sdkNav.slice(),
+  }
 })
 
 process.stdout.write(JSON.stringify(R))

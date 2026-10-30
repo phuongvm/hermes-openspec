@@ -136,10 +136,14 @@ def _find_git_root(start: Path) -> Optional[Path]:
 
 
 def _repo_root(raw_path: str) -> tuple[Path | None, str | None]:
-    """Resolve a raw path to a repo root (git root or the path itself).
+    """Resolve a raw path to the root that owns (or would own) ``openspec/``.
 
     Unlike ``_source_root``, this does NOT require ``openspec/`` to exist —
     it's used for add/update so sources can be registered before init.
+
+    A directory that owns ``openspec/`` (or is a subdirectory of an enclosing
+    git repository) resolves to itself and never climbs to the ancestor
+    ``.git`` root, so monorepo subprojects keep their own artifacts.
     """
     try:
         target = _resolve_path(raw_path)
@@ -147,10 +151,25 @@ def _repo_root(raw_path: str) -> tuple[Path | None, str | None]:
         return None, str(exc.detail)
     if not target.exists():
         return None, "Path does not exist"
-    git_root = _find_git_root(target)
-    if git_root:
-        return git_root, None
-    return target, None
+    directory = target if target.is_dir() else target.parent
+    if directory.name == "openspec" and directory.is_dir():
+        return directory.parent, None
+    if (directory / "openspec").is_dir():
+        return directory, None
+    for ancestor in directory.parents:
+        if ancestor.name == "openspec" and ancestor.is_dir():
+            return ancestor.parent, None
+    git_root = _find_git_root(directory)
+    if git_root is not None:
+        if git_root == directory:
+            return directory, None
+        if (git_root / "openspec").is_dir():
+            # Subdirectory inside a monorepo that already has its own root openspec/:
+            # keep the subdirectory distinct so it never aliases to the parent monorepo.
+            return directory, None
+        if not target.is_dir():
+            return git_root, None
+    return directory, None
 
 
 def _source_root(raw_path: str) -> tuple[Path | None, str | None]:
@@ -159,16 +178,11 @@ def _source_root(raw_path: str) -> tuple[Path | None, str | None]:
     Accepts either a repo root, the ``openspec/`` dir itself, or any path
     inside a repo whose root has ``openspec/``.
     """
-    try:
-        target = _resolve_path(raw_path)
-    except HTTPException as exc:
-        return None, str(exc.detail)
-    openspec_root = target if target.name == "openspec" else target / "openspec"
-    if openspec_root.is_dir():
-        return openspec_root.parent, None
-    git_root = _find_git_root(target)
-    if git_root and (git_root / "openspec").is_dir():
-        return git_root, None
+    root, error = _repo_root(raw_path)
+    if root is None:
+        return None, error
+    if (root / "openspec").is_dir():
+        return root, None
     return None, "No openspec/ directory found"
 
 
@@ -190,6 +204,25 @@ def _task_stats(tasks_path: Path) -> Optional[dict[str, int]]:
     done = len(_TASK_DONE_RE.findall(content))
     todo = len(_TASK_TODO_RE.findall(content))
     return {"total": done + todo, "done": done}
+
+
+_CREW_ACTIVE_STATUSES = ("running", "review", "done")
+
+
+def _promote_for_crew_activity(change: dict[str, Any]) -> None:
+    """Promote a static ``todo``/``draft`` change to ``in_progress`` on live Crew activity.
+
+    Implementation often runs in an isolated Crew worktree, so ``tasks.md`` on the base
+    branch stays unchecked. When any linked Crew card is running/review/done the change is
+    effectively in progress; the checklist-derived status is preserved as ``checklistStatus``.
+    """
+    base = str(change.get("status") or "draft")
+    if base not in ("todo", "draft") or change.get("archived"):
+        return
+    cards = change.get("crewCards") or []
+    if any(str(card.get("status") or "") in _CREW_ACTIVE_STATUSES for card in cards):
+        change["checklistStatus"] = base
+        change["status"] = "in_progress"
 
 
 def _status(has_tasks: bool, stats: Optional[dict[str, int]], *, archived: bool) -> str:
@@ -456,6 +489,7 @@ def _scan(root: Path, source_id: str, crew: Optional[_CrewLinker] = None) -> Opt
     explorations = _artifacts.scan_explorations(root, change_dirs, _change_token)
     for change in changes:
         change["crewCards"] = crew.for_change(str(change["name"]), str(change["token"]))
+        _promote_for_crew_activity(change)
     for exploration in explorations:
         exploration["crewCards"] = crew.for_exploration(
             exploration["scope"], exploration["filename"], exploration["token"]
@@ -581,7 +615,7 @@ def _change_detail(root: Path, change_name: str, crew: Optional[_CrewLinker] = N
     reviews = []
     for review in _artifacts.scan_reviews(change_dir, change_dir.name, _change_token):
         reviews.append({**review, "content": _read_doc(Path(review["path"])) or ""})
-    return {
+    detail = {
         "name": change_dir.name,
         "title": _title_from_markdown(proposal_path, change_dir.name),
         "status": _status(has_tasks, stats, archived=archived),
@@ -596,6 +630,8 @@ def _change_detail(root: Path, change_name: str, crew: Optional[_CrewLinker] = N
         "reviews": reviews,
         "crewCards": crew.for_change(change_dir.name, _change_token(change_dir.name)),
     }
+    _promote_for_crew_activity(detail)
+    return detail
 
 
 def _idea_detail(root: Path, idea_name: str) -> Optional[dict[str, Any]]:
@@ -666,16 +702,35 @@ def _list_worktree_specs(root: Path) -> list[str]:
     return out
 
 
+def _git_context(root: Path) -> tuple[Path, str]:
+    """Return ``(git_root, rel_prefix)`` for git pathspecs of a source ``root``.
+
+    ``rel_prefix`` is ``""`` when ``root`` is itself the git root (or no enclosing
+    repository exists), otherwise the posix path of ``root`` inside its enclosing
+    git repository with a trailing ``/``.
+    """
+    try:
+        resolved = root.resolve()
+        git_root = _find_git_root(resolved)
+        if git_root is None or git_root == resolved:
+            return root, ""
+        rel = resolved.relative_to(git_root.resolve()).as_posix().strip("/")
+    except (OSError, ValueError):
+        return root, ""
+    return git_root, (rel + "/") if rel and rel != "." else ""
+
+
 def _list_ref_specs(root: Path, ref: str) -> list[str]:
     ref = (ref or "").strip()
     if not ref:
         return []
     # `git ls-tree` returns paths relative to repo root. No shell involved, so
     # arbitrary refs like origin/main, HEAD~3, or full SHAs are safe arguments.
-    text = _git_output(root, ["ls-tree", "-r", "--name-only", ref, "--", "openspec/specs"], timeout=8)
+    git_root, rel = _git_context(root)
+    text = _git_output(git_root, ["ls-tree", "-r", "--name-only", ref, "--", f"{rel}openspec/specs"], timeout=8)
     if text is None:
         return []
-    prefix = "openspec/specs/"
+    prefix = f"{rel}openspec/specs/"
     return sorted(
         line[len(prefix):]
         for line in text.splitlines()
@@ -713,14 +768,15 @@ def _spec_git_dates(root: Path) -> dict[str, dict[str, str]]:
     commit (ctime / creation date). Falls back to an empty dict if git is
     unavailable.
     """
+    git_root, rel_prefix = _git_context(root)
     text = _git_output(
-        root,
-        ["log", "--no-merges", "--format=%cI", "--name-only", "--", "openspec/specs/"],
+        git_root,
+        ["log", "--no-merges", "--format=%cI", "--name-only", "--", f"{rel_prefix}openspec/specs/"],
         timeout=10,
     )
     if not text:
         return {}
-    prefix = "openspec/specs/"
+    prefix = f"{rel_prefix}openspec/specs/"
     dates: dict[str, dict[str, str]] = {}
     current_date: Optional[str] = None
     for line in text.splitlines():
@@ -745,7 +801,8 @@ def _read_ref_spec(root: Path, ref: str, spec_path: str) -> Optional[str]:
         return None
     if spec_path.startswith("/") or ".." in Path(spec_path).parts:
         return None
-    return _git_output(root, ["show", f"{ref}:openspec/specs/{spec_path}"], timeout=8)
+    git_root, rel = _git_context(root)
+    return _git_output(git_root, ["show", f"{ref}:{rel}openspec/specs/{spec_path}"], timeout=8)
 
 
 def _spec_title_from_content(content: Optional[str], fallback: str) -> str:

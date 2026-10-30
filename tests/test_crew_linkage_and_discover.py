@@ -372,3 +372,61 @@ def test_discover_link_escaping_root_is_skipped(tree, tmp_path):
     names = _names(tree["client"].post(f"/sources/{tree['sid']}/discover").json())
     assert "linked" not in names and "evil" not in names
     assert names == EXPECTED
+
+
+# ---------------------------------------------------------------------------
+# Slice 3: live Crew activity promotion (todo/draft -> in_progress)
+# ---------------------------------------------------------------------------
+
+
+def _change_status(env, name):
+    changes = {c["name"]: c for c in _scan(env)["changes"]}
+    return changes[name]
+
+
+@pytest.mark.parametrize("card_status", ["running", "review", "done"])
+def test_active_crew_card_promotes_draft_change_to_in_progress(env, card_status):
+    _make_kanban(env["home"] / "kanban.db", [
+        {"id": "t_act1", "body": "openspec/changes/demo/proposal.md", "status": card_status},
+    ])
+    change = _change_status(env, "demo")  # demo has no tasks.md -> static "draft"
+    assert change["status"] == "in_progress"
+    assert change["checklistStatus"] == "draft"
+    by_status = _scan(env)["counts"]["byStatus"]
+    assert by_status["in_progress"] == 1 and by_status["draft"] == 1  # other stays draft
+    detail = env["client"].get(f"/sources/{env['sid']}/changes/demo").json()
+    assert detail["status"] == "in_progress" and detail["checklistStatus"] == "draft"
+
+
+def test_active_crew_card_promotes_todo_change(env):
+    _write(env["repo"] / "openspec" / "changes" / "demo" / "tasks.md", "- [ ] a\n- [ ] b\n")
+    _make_kanban(env["home"] / "kanban.db", [
+        {"id": "t_act2", "body": "openspec/changes/demo/tasks.md", "status": "running"},
+    ])
+    change = _change_status(env, "demo")
+    assert change["status"] == "in_progress" and change["checklistStatus"] == "todo"
+
+
+@pytest.mark.parametrize("card_status", ["todo", "ready", "blocked", "triage"])
+def test_inactive_crew_card_does_not_promote(env, card_status):
+    _make_kanban(env["home"] / "kanban.db", [
+        {"id": "t_idle", "body": "openspec/changes/demo/proposal.md", "status": card_status},
+    ])
+    change = _change_status(env, "demo")
+    assert change["status"] == "draft" and "checklistStatus" not in change
+
+
+def test_archived_change_is_never_promoted(env):
+    _make_kanban(env["home"] / "kanban.db", [
+        {"id": "t_arch", "body": "openspec/changes/archive/2026-01-01-old/proposal.md", "status": "running"},
+    ])
+    assert _change_status(env, "2026-01-01-old")["status"] == "archived"
+
+
+def test_in_progress_change_keeps_status_without_checklist_status(env):
+    _write(env["repo"] / "openspec" / "changes" / "demo" / "tasks.md", "- [x] a\n- [ ] b\n")
+    _make_kanban(env["home"] / "kanban.db", [
+        {"id": "t_ip", "body": "openspec/changes/demo/tasks.md", "status": "running"},
+    ])
+    change = _change_status(env, "demo")
+    assert change["status"] == "in_progress" and "checklistStatus" not in change

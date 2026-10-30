@@ -140,6 +140,7 @@ const sdkExports = [
 const cnShim = 'export function cn(...a){ return a.filter(Boolean).join(" ") }'
 const sdkShim = sdkExports
   + ';' + cnShim
+  + ';export const host={navigate(u){if(globalThis.__sdkNav)globalThis.__sdkNav.push(u)}}'
   + ';export const ROUTES_AREA="routes"'
   + ';export const SIDEBAR_NAV_AREA="sidebar.nav"'
   + ';export default {}'
@@ -545,7 +546,7 @@ if (t.DetailDrawer) {
     results.detailDrawer.rootExists = true
     results.detailDrawer.isAbsoluteRight = !!(drawerDescriptor.props && String(drawerDescriptor.props.className).includes('absolute inset-y-0 right-0'))
     results.detailDrawer.hasLeftBorder = !!(drawerDescriptor.props && String(drawerDescriptor.props.className).includes('border-l'))
-    results.detailDrawer.widthIsCompact = !!(drawerDescriptor.props && String(drawerDescriptor.props.className).includes('w-[26rem]'))
+    results.detailDrawer.widthIsCompact = !!(drawerDescriptor.props && drawerDescriptor.props.style && drawerDescriptor.props.style.width === '540px')
     var closeBtn = null
     var copyBtn = null
     walk(drawerDescriptor, function(n) {
@@ -581,6 +582,7 @@ const sdkShim2 = [
   'SegmentedControl', 'Tabs', 'TabsList', 'TabsTrigger'
 ].map(n => 'export const ' + n + '=(...a)=>a').join(';')
   + ';export const useQuery=(o)=>globalThis.__openspecQuery'
+  + ';export const host={navigate(u){if(globalThis.__sdkNav)globalThis.__sdkNav.push(u)}}'
   + ';export const ROUTES_AREA="routes"'
   + ';export const SIDEBAR_NAV_AREA="sidebar.nav"'
   + ';export default {}'
@@ -1316,7 +1318,7 @@ check(colSec.match(/onClick:\s*onExpand[^}]*title:/) || colSec.match(/title:[^}]
   check(pageSec.includes('selectedItem && selectedItem.sourceId === selectedSourceId'), 'Detail visibility is still gated on selected source')
   check(pageSec.includes('setSelectedItem(null)'), 'Close control clears selected item')
   check(source.includes("'aria-label': 'Close detail'"), 'Drawer has accessible close button label')
-  check(source.includes('w-[26rem]'), 'Drawer uses Kanban-aligned compact width')
+  check(source.includes('DRAWER_WIDTH_DEFAULT = 540'), 'Drawer uses resizable default width (540px)')
   check(source.includes('border-l'), 'Drawer has left border')
   check(source.includes("overflowY: 'auto'"), 'Drawer body supports vertical scrolling')
 }
@@ -1325,7 +1327,7 @@ check(colSec.match(/onClick:\s*onExpand[^}]*title:/) || colSec.match(/title:[^}]
   const ddStart = source.indexOf('function DetailDrawer')
   const ddEnd = source.indexOf('\nfunction ', ddStart + 1)
   const ddSec = source.slice(ddStart, ddEnd > 0 ? ddEnd : source.length)
-  check(ddSec.includes('w-[26rem]'), 'Drawer root uses compact width class')
+  check(ddSec.includes("width: drawerW + 'px'"), 'Drawer root uses dynamic width style')
   check(ddSec.includes('border-l'), 'Drawer root has left border class')
 }
 // NEW: source-management dialogs remain modal
@@ -1626,7 +1628,7 @@ console.log('\n[SDK] CopyButton contract: text prop, not value')
   const ddStart = source.indexOf('function DetailDrawer')
   const ddEnd = source.indexOf('\nfunction ', ddStart + 1)
   const ddSec = source.slice(ddStart, ddEnd > 0 ? ddEnd : source.length)
-  check(ddSec.includes('w-[26rem]'), 'Drawer uses Kanban-aligned compact width')
+  check(ddSec.includes('clampDrawerWidth'), 'Drawer clamps width within bounds')
   check(ddSec.includes('border-l'), 'Drawer has left border')
 }
 
@@ -2144,7 +2146,7 @@ console.log('\n[Identity 1.5] Copy controls, detail identity, footer layout')
   check(ddSec.includes("'Copy item reference'"), 'DetailDrawer copy control label is "Copy item reference"')
   check(ddSec.includes('data-detail-drawer'), 'DetailDrawer root carries data-detail-drawer marker')
   check(ddSec.includes('absolute inset-y-0 right-0'), 'DetailDrawer root is absolute right overlay')
-  check(ddSec.includes('w-[26rem]'), 'DetailDrawer uses Kanban-aligned compact width')
+  check(ddSec.includes('data-drawer-resize-handle'), 'DetailDrawer renders resize handle')
   check(ddSec.includes('border-l'), 'DetailDrawer has left border')
   check(ddSec.includes("'Close detail'"), 'DetailDrawer close button has accessible label')
 }
@@ -2346,7 +2348,7 @@ if (r.__testAvailable) {
   check(drawer.rootExists === true, 'DetailDrawer root exists', JSON.stringify(drawer.rootExists))
   check(drawer.isAbsoluteRight === true, 'DetailDrawer root is positioned absolute right', JSON.stringify(drawer.isAbsoluteRight))
   check(drawer.hasLeftBorder === true, 'DetailDrawer has left border', JSON.stringify(drawer.hasLeftBorder))
-  check(drawer.widthIsCompact === true, 'DetailDrawer width is compact (26rem)', JSON.stringify(drawer.widthIsCompact))
+  check(drawer.widthIsCompact === true, 'DetailDrawer default width is 540px', JSON.stringify(drawer.widthIsCompact))
   check(drawer.hasCloseButton === true, 'DetailDrawer has close button', JSON.stringify(drawer.hasCloseButton))
   check(drawer.closeLabel === 'Close detail', 'DetailDrawer close button label is "Close detail"', JSON.stringify(drawer.closeLabel))
   check(drawer.copyLabel === 'Copy item reference', 'DetailDrawer copy button label is "Copy item reference"', JSON.stringify(drawer.copyLabel))
@@ -2621,6 +2623,70 @@ check(!web.__driverError, 'Web dashboard driver executes the shipped IIFE', web.
   const tb = web.toolbar || {}
   check(tb.discover === true && tb.disabled === false, 'web toolbar exposes an enabled Discover button for a valid source', JSON.stringify(tb))
   check((web.toolbarNoSource || {}).disabled === null || (web.toolbarNoSource || {}).disabled === true, 'web Discover is disabled without an active source', JSON.stringify(web.toolbarNoSource))
+}
+
+console.log('\n[Slice 3] Live Crew promotion, radar scanning, resizable drawers, theme tokens, persistent route tile & parity')
+{
+  const k = (s2 && s2.slice3) || {}
+  check(!k.__error, 'Slice 3 UI probe ran cleanly', k.__error)
+  check((s2.register && s2.register.routeTitle) === 'OpenSpec', 'ROUTES_AREA registers title: "OpenSpec"', JSON.stringify(s2.register))
+  check(JSON.stringify(k.hashPromoted) === '["/openspec"]', '#/openspec hash route promotes to persistent tile via host.navigate("/openspec")', JSON.stringify(k.hashPromoted))
+  check(JSON.stringify(k.nonMatchNav) === '[]', 'Non-#/openspec hash does not trigger route promotion', JSON.stringify(k.nonMatchNav))
+  check(k.sourcesRefetch === 5000 && k.changeRefetch === 5000, 'Sources and change detail queries poll at refetchInterval: 5000ms', JSON.stringify([k.sourcesRefetch, k.changeRefetch]))
+
+  check(JSON.stringify(k.inProgSorted) === '["alpha","gamma","beta"]', 'Todo/Draft changes with active Crew cards promote to in-progress and sort running -> review -> done', JSON.stringify(k.inProgSorted))
+  check(k.alphaRadar === 'running' && String(k.alphaClass).includes('os-card-live'), 'Running Crew card applies data-radar="running" and .os-card-live', JSON.stringify([k.alphaRadar, k.alphaClass]))
+  check(k.gammaRadar === 'review' && String(k.gammaClass).includes('os-card-review'), 'Review Crew card applies data-radar="review" and .os-card-review', JSON.stringify([k.gammaRadar, k.gammaClass]))
+  check(k.betaRadar === null && !String(k.betaClass).includes('os-card-live') && !String(k.betaClass).includes('os-card-review'), 'Done-only change has no radar animation', JSON.stringify([k.betaRadar, k.betaClass]))
+  check(String(k.alphaPills).includes('1 running'), 'BoardCard footer renders Crew status pill', JSON.stringify(k.alphaPills))
+  check(source.includes('@property --os-arc') && source.includes('os-radar-spin'), 'Desktop plugin injects conic-gradient radar CSS')
+
+  check(JSON.stringify(k.clamp) === '[380,540,960,540,180,260,480,260]', 'clampDrawerWidth [380,960] and clampSpecsSidebarWidth [180,480] enforce bounds', JSON.stringify(k.clamp))
+  check(k.ddWidth === '640px' && k.sashRole === 'separator' && k.sashOrient === 'vertical', 'DetailDrawer applies width prop and vertical separator sash', JSON.stringify([k.ddWidth, k.sashRole, k.sashOrient]))
+  check(JSON.stringify(k.widthEvents) === '[[720,false],[720,true],[540,true],[664,true]]', 'DetailDrawer sash pointer drag, double-click reset, and keyboard resize emit clamped widths', JSON.stringify(k.widthEvents))
+  check(JSON.stringify(k.ddRef) === '["workspaces/os_e80720"]', 'DetailDrawer metadata renders full <source>/<token> reference', JSON.stringify(k.ddRef))
+  check(JSON.stringify(k.ddBadges) === '["Checklist: 0/7","Crew: 3/5 done · 1 running"]', 'DetailDrawer disambiguates Checklist: 0/7 and Crew: 3/5 done · 1 running', JSON.stringify(k.ddBadges))
+  check(k.specsSidebarW === '320px' && k.specsSashExists === true && k.savedAfterKey === 344, 'SpecsView reads and persists specsSidebarWidth via ctx.storage', JSON.stringify([k.specsSidebarW, k.specsSashExists, k.savedAfterKey]))
+
+  check(k.tabsWrap === 'wrap' && (k.tabLabels || []).length === 6 && k.tabLabels.some(l => l.includes('Explorations (1)')), 'ChangeDetailDrawer 6-tab TabsList wraps without clipping and shows counts', JSON.stringify([k.tabsWrap, k.tabLabels]))
+  check(k.dateNowrap === 'nowrap' && k.titleFullWidth === true, 'Exploration rows render full-width titles and nowrap YYYY-MM-DD dates', JSON.stringify([k.dateNowrap, k.titleFullWidth]))
+
+  check(k.collapsed20ListCount === 0 && String(k.collapsed20Summary).includes('20 tickets') && String(k.collapsed20Summary).includes('4 running'), '20 Crew cards collapse by default into a status-grouped summary bar', JSON.stringify([k.collapsed20ListCount, k.collapsed20Summary]))
+  check(k.expanded20Cards === 20 && k.expanded20MaxH === '200px', 'Expanded CrewCardChips renders bounded 200px scrollable ticket list', JSON.stringify([k.expanded20Cards, k.expanded20MaxH]))
+  check(JSON.stringify(k.sdkHostNav) === '["/crew?card=t_01"]', 'CrewCardChips navigates via @hermes/plugin-sdk host.navigate when ctx.host is absent', JSON.stringify(k.sdkHostNav))
+
+  // Theme-native token audit (desktop/plugin.js + dashboard/dist/style.css)
+  const bannedDesktop = [
+    '--editor-background', '--ui-selected-background', '--ui-hover-background',
+    '--card-background', '--input-background', '--ui-border',
+    '--destructive-background', '--warning-background',
+    '#1e1e1e', '#2a2a2a', '#1a1a1a', '#333', '#3d1a1a', '#fff3cd', '#e0e0e0',
+  ]
+  const foundDesktop = bannedDesktop.filter(tok => source.toLowerCase().includes(tok))
+  check(foundDesktop.length === 0, 'desktop/plugin.js has zero hardcoded dark hex fallbacks or undefined CSS vars', foundDesktop.join(', '))
+
+  const webCss = readFileSync(resolve(__dirname, '../dashboard/dist/style.css'), 'utf8')
+  const bannedCss = ['#1e1e1e', '#2a2a2a', '#1a1a1a', '#161616', '#0e0e0e', '#333', '#e0e0e0']
+  const foundCss = bannedCss.filter(tok => webCss.toLowerCase().includes(tok))
+  check(foundCss.length === 0, 'dashboard/dist/style.css has zero hardcoded dark surface hex fallbacks', foundCss.join(', '))
+  check(webCss.includes('@property --os-arc') && webCss.includes('.os-card-live::after'), 'dashboard/dist/style.css defines radar scanning animation')
+
+  // Web Slice 3 assertions
+  const ws3 = (web && web.slice3) || {}
+  check(ws3.collapsed20Links === 0 && String(ws3.collapsed20Summary).includes('20 tickets'), 'Web CrewCards collapses 20 tickets into status-grouped summary', JSON.stringify(ws3))
+  check(ws3.firstRadar === 'running' && ws3.secondRadar === null && String((ws3.cardOrder || [])[0]).includes('Alpha'), 'Web Board promotes running change above lower-sequence idle change with data-radar="running"', JSON.stringify(ws3))
+  check(JSON.stringify(ws3.dlgBadges) === '["Checklist: 0/7","Crew: 3/5 done · 1 running"]' && ws3.hasModalSash === true, 'Web DetailDialog shows Checklist + Crew badges and resize sash', JSON.stringify(ws3))
+
+  // Cross-surface parity suite
+  let parityOk = false
+  let parityOut = ''
+  try {
+    parityOut = execSync('node ' + resolve(__dirname, 'crew-surface-parity.mjs'), { encoding: 'utf8', timeout: 30000 })
+    parityOk = parityOut.includes('0 failed')
+  } catch (e) {
+    parityOut = String(e && e.message || e).slice(0, 500)
+  }
+  check(parityOk, 'Cross-surface parity suite (crew-surface-parity.mjs) passes with zero divergences', parityOk ? undefined : parityOut)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

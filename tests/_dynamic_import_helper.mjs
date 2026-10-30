@@ -21,6 +21,7 @@ const sdkExports = [
 ].map(n => 'export const ' + n + '=(...a)=>a').join(';')
 // ROUTES_AREA and SIDEBAR_NAV_AREA are string constants, not functions
 const sdkShim = sdkExports
+  + ';export const host={navigate(u){if(globalThis.__sdkNav)globalThis.__sdkNav.push(u)}}'
   + ';export const ROUTES_AREA="routes"'
   + ';export const SIDEBAR_NAV_AREA="sidebar.nav"'
   + ';export default {}'

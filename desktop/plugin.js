@@ -11,7 +11,7 @@
  */
 
 import {
-  Badge, Button, cn, Codicon, CopyButton, Dialog, DialogContent, EmptyState, ErrorState,
+  Badge, Button, cn, Codicon, CopyButton, Dialog, DialogContent, EmptyState, ErrorState, host,
   Input, Loader, ROUTES_AREA, SearchField, Select,
   SelectContent, SelectItem, SelectTrigger, SelectValue,
   SegmentedControl, SIDEBAR_NAV_AREA, Tabs, TabsList, TabsTrigger, useQuery
@@ -20,6 +20,36 @@ import React from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 var SOURCE_TRIGGER_HOVER_CSS = '[data-openspec-source-trigger].desktop-input-chrome { background-color: var(--chrome-action-hover) !important; } [data-openspec-source-trigger].desktop-input-chrome:hover { background-color: var(--chrome-action-hover) !important; }'
+
+// Crew-style conic-gradient radar sweep on cards with running (green) or review (amber) Crew tickets.
+var RADAR_CSS = ' @property --os-arc { syntax: "<angle>"; inherits: false; initial-value: 0deg; }' +
+  ' @keyframes os-radar-spin { to { --os-arc: 360deg; } }' +
+  ' .os-card-live, .os-card-review { position: relative; }' +
+  ' .os-card-live::after, .os-card-review::after { content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;' +
+  ' background: conic-gradient(from var(--os-arc), transparent 0 68%, var(--os-radar-color) 88%, transparent 100%);' +
+  ' -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; }' +
+  ' .os-card-live::after { --os-radar-color: var(--ui-success, #34d399); animation: os-radar-spin 2.2s linear infinite; }' +
+  ' .os-card-review::after { --os-radar-color: #f59e0b; animation: os-radar-spin 6s linear infinite; }' +
+  ' @media (prefers-reduced-motion: reduce) { .os-card-live::after, .os-card-review::after { animation: none; } }'
+
+var OPENSPEC_PAGE_CSS = SOURCE_TRIGGER_HOVER_CSS + RADAR_CSS
+
+// Theme-native surfaces: only Hermes Desktop semantic tokens and color-mix(currentColor), no hardcoded dark fallbacks.
+var BORDER_SUBTLE = '1px solid var(--ui-stroke-tertiary, color-mix(in srgb, currentColor 14%, transparent))'
+var SURFACE_CODE = 'color-mix(in srgb, currentColor 6%, var(--ui-bg-elevated, transparent))'
+var SURFACE_INLINE_CODE = 'var(--ui-inline-code-background, color-mix(in srgb, currentColor 10%, transparent))'
+var BANNER_ERROR = 'color-mix(in srgb, var(--destructive, #ef4444) 12%, transparent)'
+var BANNER_WARNING = 'color-mix(in srgb, #f59e0b 14%, transparent)'
+
+var DRAWER_WIDTH_DEFAULT = 540
+var DRAWER_WIDTH_MIN = 380
+var DRAWER_WIDTH_MAX = 960
+var SPECS_SIDEBAR_DEFAULT = 260
+var SPECS_SIDEBAR_MIN = 180
+var SPECS_SIDEBAR_MAX = 480
+var CREW_INLINE_LIMIT = 3
+var CREW_BUCKETS = ['running', 'review', 'blocked', 'queued', 'done']
+var POLL_INTERVAL_MS = 5000
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Pure helpers — exported as __test for headless verification
@@ -139,7 +169,7 @@ function groupByStatus(items, showArchived) {
   for (var i = 0; i < order.length; i++) groups[order[i]] = []
   for (var j = 0; j < (items || []).length; j++) {
     var item = items[j]
-    var status = normalizeStatus(item.status || item.state || item.phase)
+    var status = effectiveChangeStatus(item)
     if (!showArchived && status === 'archived') continue
     if (!groups[status]) groups[status] = []
     groups[status].push(item)
@@ -152,8 +182,57 @@ function normalizeSequencePosition(sequence) {
   return typeof position === 'number' && Number.isFinite(position) ? position : null
 }
 
+function groupCrewCardsByStatus(cards) {
+  var g = { total: 0, running: [], review: [], blocked: [], queued: [], done: [], activeState: 'idle' }
+  var list = Array.isArray(cards) ? cards : []
+  for (var i = 0; i < list.length; i++) {
+    var card = list[i]
+    if (!card) continue
+    var st = String(card.status || '').toLowerCase()
+    if (st === 'archived') continue
+    g.total++
+    if (st === 'running') g.running.push(card)
+    else if (st === 'review') g.review.push(card)
+    else if (st === 'blocked' || st === 'triage') g.blocked.push(card)
+    else if (st === 'done' || st === 'completed') g.done.push(card)
+    else g.queued.push(card)
+  }
+  if (g.running.length > 0) g.activeState = 'running'
+  else if (g.review.length > 0) g.activeState = 'review'
+  else if (g.blocked.length > 0) g.activeState = 'blocked'
+  else if (g.queued.length > 0) g.activeState = 'queued'
+  else if (g.done.length > 0) g.activeState = 'done'
+  return g
+}
+
+function itemActivityRank(item) {
+  var g = groupCrewCardsByStatus(crewCardsFor(item))
+  if (g.running.length > 0) return 0
+  if (g.review.length > 0) return 1
+  if (g.blocked.length > 0) return 2
+  if (g.queued.length > 0) return 3
+  return 4
+}
+
+// Static tasks.md status stays 0/N while work runs in an isolated Crew worktree: live Crew
+// activity (running/review/done) promotes a todo/draft change to in-progress.
+function effectiveChangeStatus(item) {
+  var base = normalizeStatus(item && (item.status || item.state || item.phase))
+  if (base !== 'todo' && base !== 'draft') return base
+  var g = groupCrewCardsByStatus(crewCardsFor(item))
+  return (g.running.length > 0 || g.review.length > 0 || g.done.length > 0) ? 'in-progress' : base
+}
+
+function crewProgressLabel(grouped) {
+  var g = grouped || groupCrewCardsByStatus([])
+  return 'Crew: ' + g.done.length + '/' + g.total + ' done' + (g.running.length > 0 ? ' \u00b7 ' + g.running.length + ' running' : '')
+}
+
 function sortItems(items) {
   return (items || []).slice().sort(function(a, b) {
+    var ra = itemActivityRank(a)
+    var rb = itemActivityRank(b)
+    if (ra !== rb) return ra - rb
     var sa = normalizeSequencePosition(a.sequence)
     var sb = normalizeSequencePosition(b.sequence)
     if (sa == null) sa = 9999
@@ -165,6 +244,53 @@ function sortItems(items) {
     if (ta > tb) return 1
     return 0
   })
+}
+
+function clampWidth(px, min, max, fallback) {
+  var n = (px == null || px === '') ? NaN : Number(px)
+  if (!isFinite(n)) n = fallback
+  return Math.min(max, Math.max(min, Math.round(n)))
+}
+
+function clampDrawerWidth(px) { return clampWidth(px, DRAWER_WIDTH_MIN, DRAWER_WIDTH_MAX, DRAWER_WIDTH_DEFAULT) }
+
+function clampSpecsSidebarWidth(px) { return clampWidth(px, SPECS_SIDEBAR_MIN, SPECS_SIDEBAR_MAX, SPECS_SIDEBAR_DEFAULT) }
+
+function readStoredWidth(ctx, key, clamp) {
+  try {
+    if (ctx && ctx.storage && typeof ctx.storage.get === 'function') return clamp(ctx.storage.get(key, null))
+  } catch (e) { /* storage blocked: fall back to the default width */ }
+  return clamp(undefined)
+}
+
+function writeStoredWidth(ctx, key, width) {
+  try {
+    if (ctx && ctx.storage && typeof ctx.storage.set === 'function') ctx.storage.set(key, width)
+  } catch (e) { /* storage full or blocked: the width still applies this session */ }
+}
+
+// Pointer-drag resize shared by the drawer (dir -1: dragging left widens) and the specs sidebar (dir +1).
+function beginResize(e, startWidth, dir, clamp, onChange, onDone) {
+  if (!e || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+  if (typeof e.preventDefault === 'function') e.preventDefault()
+  var startX = e.clientX
+  function next(ev) { return clamp(startWidth + dir * (ev.clientX - startX)) }
+  function move(ev) { if (onChange) onChange(next(ev)) }
+  function up(ev) {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+    if (onDone) onDone(next(ev))
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
+}
+
+// Navigate through the plugin host: ctx.host (mock/test contexts) first, then the SDK's top-level host.
+function navigateToCrewCard(ctx, url) {
+  if (!url) return null
+  if (ctx && ctx.host && typeof ctx.host.navigate === 'function') return ctx.host.navigate(url)
+  if (host && typeof host.navigate === 'function') return host.navigate(url)
+  return null
 }
 
 function filterItems(items, query) {
@@ -615,7 +741,7 @@ function renderInline(text) {
   while ((match = regex.exec(remaining)) !== null) {
     if (match.index > lastIndex) parts.push(remaining.slice(lastIndex, match.index))
     if (match[2]) parts.push(jsx('strong', { style: { fontWeight: 600 }, children: match[2] }))
-    else if (match[3]) parts.push(jsx('code', { style: { background: 'var(--editor-background, #1e1e1e)', padding: '1px 4px', borderRadius: '3px', fontFamily: 'monospace', fontSize: '0.9em' }, children: match[3] }))
+    else if (match[3]) parts.push(jsx('code', { style: { background: SURFACE_INLINE_CODE, color: 'var(--ui-inline-code-foreground, inherit)', padding: '1px 4px', borderRadius: '3px', fontFamily: 'monospace', fontSize: '0.9em' }, children: match[3] }))
     else if (match[4]) {
       if (isSafeUrl(match[5])) {
         parts.push(jsx('a', { href: match[5], target: '_blank', rel: 'noopener noreferrer', style: { color: 'var(--link-foreground, #4fc3f7)', textDecoration: 'underline' }, children: match[4] }))
@@ -635,16 +761,16 @@ function MarkdownElement(el) {
   if (!el || !el.type) return null
   switch (el.type) {
     case 'heading':
-      return jsx('div', { style: { fontWeight: 'bold', fontSize: el.level <= 2 ? '1.1em' : '1em', margin: '8px 0 4px', color: 'var(--foreground, #e0e0e0)' }, children: renderInline(el.text) })
+      return jsx('div', { style: { fontWeight: 'bold', fontSize: el.level <= 2 ? '1.1em' : '1em', margin: '8px 0 4px', color: 'var(--foreground, inherit)' }, children: renderInline(el.text) })
     case 'paragraph':
-      return jsx('div', { style: { margin: '4px 0', color: 'var(--foreground, #e0e0e0)' }, children: renderInline(el.text) })
+      return jsx('div', { style: { margin: '4px 0', color: 'var(--foreground, inherit)' }, children: renderInline(el.text) })
     case 'list-item':
-      return jsxs('div', { style: { margin: '1px 0', paddingLeft: '16px', color: 'var(--foreground, #e0e0e0)' }, children: [
+      return jsxs('div', { style: { margin: '1px 0', paddingLeft: '16px', color: 'var(--foreground, inherit)' }, children: [
         el.ordered ? '  ' : '\u2022 ',
         renderInline(el.text)
       ] })
     case 'fenced':
-      return jsx('pre', { style: { background: 'var(--editor-background, #1e1e1e)', padding: '8px', borderRadius: '4px', margin: '4px 0', overflow: 'auto', fontFamily: 'monospace', fontSize: '0.9em', color: 'var(--foreground, #e0e0e0)' }, children: el.content })
+      return jsx('pre', { style: { background: SURFACE_CODE, border: BORDER_SUBTLE, padding: '8px', borderRadius: '4px', margin: '4px 0', overflow: 'auto', fontFamily: 'monospace', fontSize: '0.9em', color: 'var(--foreground, inherit)' }, children: el.content })
     default:
       return null
   }
@@ -725,7 +851,7 @@ function SourceDialog({ mode, api, source, onClose, onSaved }) {
   }
 
   return jsx(Dialog, { open: true, onOpenChange: onClose, children: jsxs(DialogContent, { style: { padding: '16px', maxWidth: '480px' }, children: [
-    jsx('h2', { style: { fontSize: '16px', fontWeight: 600, margin: '0 0 12px', color: 'var(--foreground, #e0e0e0)' }, children: title }),
+    jsx('h2', { style: { fontSize: '16px', fontWeight: 600, margin: '0 0 12px', color: 'var(--foreground, inherit)' }, children: title }),
     jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px' }, children: [
       jsxs('div', { children: [
         jsx('label', { style: { fontSize: '12px', fontWeight: 500, color: 'var(--muted-foreground, #888)', marginBottom: '4px', display: 'block' }, children: 'Path *' }),
@@ -736,7 +862,7 @@ function SourceDialog({ mode, api, source, onClose, onSaved }) {
         jsx(Input, { value: name, onChange: function(e) { setName(e.target.value) }, placeholder: 'Optional display name', disabled: busy }),
       ] }),
     ] }),
-    err ? jsx('div', { style: { padding: '8px 12px', background: 'var(--destructive-background, #3d1a1a)', borderRadius: '4px', fontSize: '12px', color: 'var(--destructive, #f44336)', marginBottom: '12px' }, children: err }) : null,
+    err ? jsx('div', { style: { padding: '8px 12px', background: BANNER_ERROR, borderRadius: '4px', fontSize: '12px', color: 'var(--foreground, inherit)', marginBottom: '12px' }, children: err }) : null,
     jsxs('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '8px' }, children: [
       jsx(Button, { variant: 'outline', size: 'sm', onClick: onClose, disabled: busy, children: 'Cancel' }),
       jsx(Button, { size: 'sm', onClick: handleSave, disabled: busy, children: busy ? 'Saving...' : 'Save' }),
@@ -771,6 +897,23 @@ function CardArtifacts({ item }) {
   })
 }
 
+function CardCrewPills({ item }) {
+  var g = groupCrewCardsByStatus(crewCardsFor(item))
+  if (g.total === 0) return null
+  var defs = [
+    { key: 'running', glyph: '\u25cf', color: 'var(--ui-success, #34d399)' },
+    { key: 'review', glyph: '\u25d0', color: '#f59e0b' },
+    { key: 'blocked', glyph: '!', color: 'var(--destructive, #ef4444)' },
+    { key: 'queued', glyph: '\u25cb', color: 'var(--ui-text-secondary)' },
+    { key: 'done', glyph: '\u2713', color: 'var(--ui-text-tertiary)' },
+  ]
+  return jsx('div', { 'data-crew-pills': 'true', style: { display: 'flex', gap: '6px', flexWrap: 'wrap', fontSize: '10px' },
+    children: defs.filter(function(d) { return g[d.key].length > 0 }).map(function(d) {
+      return jsx('span', { 'data-crew-pill': d.key, style: { color: d.color, whiteSpace: 'nowrap' }, children: d.glyph + ' ' + g[d.key].length + ' ' + d.key }, d.key)
+    })
+  })
+}
+
 function BoardCard({ item, source, allSources, allItems, onSelect }) {
   var token = item.token || item.name || ''
   var title = item.title || item.name || 'Untitled'
@@ -778,33 +921,38 @@ function BoardCard({ item, source, allSources, allItems, onSelect }) {
   var itemRef = buildItemReference(source, item, allSources)
   var canCopy = !!itemRef && hasUniqueItemToken(item, allItems)
   var onClick = function() { onSelect(item) }
-  var status = normalizeStatus(item.status || item.state || item.phase)
+  var status = effectiveChangeStatus(item)
+  var activeState = groupCrewCardsByStatus(crewCardsFor(item)).activeState
+  var radar = activeState === 'running' ? 'running' : (activeState === 'review' ? 'review' : null)
   return jsxs('div', {
     className: cn(
+      radar === 'running' ? 'os-card-live' : null,
+      radar === 'review' ? 'os-card-review' : null,
       'rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) px-3 pt-3 pb-0 cursor-pointer',
       'hover:border-(--ui-focus-border) hover:bg-primary/[0.06] hover:shadow-md transition-colors',
       'focus-visible:bg-(--ui-control-hover-background)'
     ),
     style: { borderLeftWidth: '2px', borderLeftColor: statusTone(status) },
     'data-selectable-text': 'true',
+    'data-radar': radar || undefined,
     tabIndex: 0,
     role: 'button',
     onClick: onClick,
     onKeyDown: function(e) { handleActivateKey(e, onClick) },
     children: [
       jsxs('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }, children: [
-        jsx('div', { style: { fontWeight: 500, fontSize: '13px', color: 'var(--foreground, #e0e0e0)' }, children: title }),
+        jsx('div', { style: { fontWeight: 500, fontSize: '13px', color: 'var(--foreground, inherit)' }, children: title }),
         sequencePosition != null ? jsx(Badge, { variant: 'outline', style: { fontSize: '10px', flexShrink: 0 }, children: '#' + sequencePosition }) : null
       ] }),
       jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }, children: [
         jsx(CardArtifacts, { item: item }),
-        jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }, children: [
-          jsx(CardTaskFraction, { item: item }),
-          jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginLeft: 'auto', flexShrink: 0 }, children: [
+        jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flexWrap: 'wrap' }, children: [jsx(CardTaskFraction, { item: item })].concat(
+          crewCardsFor(item).length > 0 ? [jsx(CardCrewPills, { item: item })] : [],
+          [jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginLeft: 'auto', flexShrink: 0 }, children: [
             canCopy ? jsx(CopyButton, { appearance: 'icon', text: itemRef, label: 'Copy item reference', title: itemRef, stopPropagation: true }) : null,
             token ? jsx('span', { style: { fontFamily: 'monospace', fontSize: '10px', color: 'var(--muted-foreground, #888)' }, children: token }) : null,
-          ] }),
-        ] }),
+          ] })]
+        ) }),
       ] }),
     ]
   }, token || title)
@@ -886,15 +1034,48 @@ function BoardColumn({ status, items, source, allSources, allItems, onSelect, co
 // Detail drawer
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function DetailDrawer({ title, secondary, itemRef, canCopy, token, taskStats, onClose, children }) {
+function DetailDrawer({ title, secondary, itemRef, canCopy, token, taskStats, crewCards, width, onWidthChange, onClose, children }) {
+  var drawerW = clampDrawerWidth(width == null ? DRAWER_WIDTH_DEFAULT : width)
+  var refText = itemRef || token || ''
+  var crew = groupCrewCardsByStatus(crewCards)
+
+  function onSashPointerDown(e) {
+    if (!onWidthChange) return
+    beginResize(e, drawerW, -1, clampDrawerWidth,
+      function(w) { onWidthChange(w, false) },
+      function(w) { onWidthChange(w, true) })
+  }
+  function onSashKeyDown(e) {
+    if (!e || !onWidthChange) return
+    var step = e.key === 'ArrowLeft' ? 24 : (e.key === 'ArrowRight' ? -24 : 0)
+    if (!step) return
+    if (typeof e.preventDefault === 'function') e.preventDefault()
+    onWidthChange(clampDrawerWidth(drawerW + step), true)
+  }
+
   return jsxs('div', {
-    className: cn('absolute inset-y-0 right-0 z-20 flex w-[26rem] flex-col border-l border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) shadow-lg'),
-    style: { minHeight: '0' },
+    className: cn('absolute inset-y-0 right-0 z-20 flex flex-col border-l border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) shadow-lg'),
+    style: { minHeight: '0', width: drawerW + 'px', maxWidth: '100%' },
     'data-detail-drawer': 'true',
     children: [
-      jsxs('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--ui-border, #333)', flexShrink: 0 }, children: [
+      jsx('div', {
+        role: 'separator',
+        'aria-orientation': 'vertical',
+        'aria-label': 'Resize detail drawer',
+        'aria-valuenow': drawerW,
+        'aria-valuemin': DRAWER_WIDTH_MIN,
+        'aria-valuemax': DRAWER_WIDTH_MAX,
+        'data-drawer-resize-handle': 'true',
+        tabIndex: 0,
+        title: 'Drag to resize (double-click to reset)',
+        onPointerDown: onSashPointerDown,
+        onDoubleClick: function() { if (onWidthChange) onWidthChange(DRAWER_WIDTH_DEFAULT, true) },
+        onKeyDown: onSashKeyDown,
+        style: { position: 'absolute', left: '-3px', top: 0, bottom: 0, width: '6px', cursor: 'col-resize', zIndex: 30, touchAction: 'none' }
+      }),
+      jsxs('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: BORDER_SUBTLE, flexShrink: 0 }, children: [
         jsxs('div', { style: { minWidth: 0 }, children: [
-          jsx('h2', { style: { fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--foreground, #e0e0e0)' }, children: title }),
+          jsx('h2', { style: { fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--foreground, inherit)' }, children: title }),
           secondary ? jsx('div', { style: { fontSize: '12px', color: 'var(--muted-foreground, #888)', fontFamily: 'monospace', marginTop: '2px' }, children: secondary }) : null,
         ] }),
         jsx('button', {
@@ -906,10 +1087,11 @@ function DetailDrawer({ title, secondary, itemRef, canCopy, token, taskStats, on
           children: jsx(Codicon, { name: 'close', size: '1rem' })
         }),
       ] }),
-      jsxs('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '8px 16px', borderBottom: '1px solid var(--ui-border, #333)', flexShrink: 0 }, children: [
+      jsxs('div', { 'data-drawer-meta': 'true', style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', padding: '8px 16px', borderBottom: BORDER_SUBTLE, flexShrink: 0 }, children: [
         canCopy ? jsx(CopyButton, { appearance: 'icon', text: itemRef, label: 'Copy item reference', title: itemRef }) : null,
-        token ? jsx('span', { style: { fontSize: '12px', color: 'var(--muted-foreground, #888)', fontFamily: 'monospace' }, children: token }) : null,
-        taskStats ? jsx(Badge, { variant: 'outline', children: taskStats.done + '/' + taskStats.total + ' tasks' }) : null,
+        refText ? jsx('span', { 'data-drawer-ref': refText, style: { fontSize: '12px', color: 'var(--muted-foreground, #888)', fontFamily: 'monospace', wordBreak: 'break-all' }, children: refText }) : null,
+        taskStats ? jsx(Badge, { variant: 'outline', 'data-drawer-badge': 'checklist', children: 'Checklist: ' + taskStats.done + '/' + taskStats.total }) : null,
+        crew.total > 0 ? jsx(Badge, { variant: 'outline', 'data-drawer-badge': 'crew', children: crewProgressLabel(crew) }) : null,
       ] }),
       jsx('div', { 'data-selectable-text': 'true', style: { flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: '0', padding: '8px 0' }, children: children }),
     ]
@@ -921,10 +1103,11 @@ function DetailDrawer({ title, secondary, itemRef, canCopy, token, taskStats, on
 // Change detail drawer
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItems, ctx, onSelectExploration, onClose }) {
+function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItems, ctx, width, onWidthChange, onSelectExploration, onClose }) {
   var query = useQuery({
     queryKey: ['openspec', 'change', sourceId, change.name || change.token],
-    queryFn: function() { return api.change(sourceId, change.name || change.token) }
+    queryFn: function() { return api.change(sourceId, change.name || change.token) },
+    refetchInterval: POLL_INTERVAL_MS
   })
 
   var [activeTab, setActiveTab] = React.useState(null)
@@ -935,8 +1118,8 @@ function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItem
   var secondary = query.data && query.data.name ? query.data.name : (change.name || '')
   var token = change.token || change.name || ''
 
-  if (query.isLoading) return jsx(DetailDrawer, { title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(Loader, { type: 'lemniscate-bloom' }) })
-  if (query.error) return jsx(DetailDrawer, { title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(RetryErrorState, { title: 'Failed to load change', description: query.error.message, onRetry: function() { query.refetch() } }) })
+  if (query.isLoading) return jsx(DetailDrawer, { width: width, onWidthChange: onWidthChange, title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(Loader, { type: 'lemniscate-bloom' }) })
+  if (query.error) return jsx(DetailDrawer, { width: width, onWidthChange: onWidthChange, title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(RetryErrorState, { title: 'Failed to load change', description: query.error.message, onRetry: function() { query.refetch() } }) })
 
   var data = query.data || {}
   var localExplorations = nonEmptyList(data.explorations) ? data.explorations : []
@@ -944,11 +1127,11 @@ function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItem
     proposal: function() { return { key: 'proposal', label: 'Proposal', content: jsx(MarkdownView, { content: stripFrontmatter(data.proposal) }) } },
     tasks: function() { return { key: 'tasks', label: 'Tasks', content: jsx(TaskView, { content: stripFrontmatter(data.tasks) }) } },
     design: function() { return { key: 'design', label: 'Design', content: jsx(MarkdownView, { content: stripFrontmatter(data.design) }) } },
-    specs: function() { return { key: 'specs', label: 'Specs', content: jsx(SpecsDetailView, { specs: data.specs }) } },
-    reviews: function() { return { key: 'reviews', label: 'Reviews', content: jsx(ReviewsView, { reviews: data.reviews }) } },
+    specs: function() { return { key: 'specs', label: 'Specs (' + data.specs.length + ')', content: jsx(SpecsDetailView, { specs: data.specs }) } },
+    reviews: function() { return { key: 'reviews', label: 'Reviews (' + data.reviews.length + ')', content: jsx(ReviewsView, { reviews: data.reviews }) } },
     explorations: function() {
       var pool = (source && source.openspec && source.openspec.explorations) || localExplorations
-      return { key: 'explorations', label: 'Explorations', content: jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px' }, children: localExplorations.map(function(ex) {
+      return { key: 'explorations', label: 'Explorations (' + localExplorations.length + ')', content: jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px' }, children: localExplorations.map(function(ex) {
         return renderExplorationRow(ex, source, allSources, pool, onSelectExploration || function() {})
       }) }) }
     },
@@ -963,18 +1146,19 @@ function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItem
   title = detailTitle(data, change, change, 'change')
   secondary = detailSecondaryName(data, change)
 
-  return jsx(DetailDrawer, {
+  return jsx(DetailDrawer, { width: width, onWidthChange: onWidthChange,
     title: title,
     secondary: secondary,
     itemRef: itemRef,
     canCopy: canCopy,
     token: token,
     taskStats: data.taskStats,
+    crewCards: crewCards,
     onClose: onClose,
     children: jsxs('div', { children: [
       jsx(CrewCardChips, { cards: crewCards, ctx: ctx }),
       tabs.length > 0 ? jsxs(Tabs, { value: currentTab, onValueChange: setActiveTab, children: [
-        jsx(TabsList, { children: tabs.map(function(t) { return jsx(TabsTrigger, { value: t.key, children: t.label }, t.key) }) }),
+        jsx(TabsList, { style: { display: 'flex', flexWrap: 'wrap', height: 'auto', width: '100%', justifyContent: 'flex-start', gap: '4px', padding: '4px' }, children: tabs.map(function(t) { return jsx(TabsTrigger, { value: t.key, children: t.label }, t.key) }) }),
         tabs.map(function(t) { return currentTab === t.key ? jsx('div', { key: t.key, children: t.content }) : null }),
       ] }) : jsx(EmptyState, { title: 'No artifacts', description: 'This change has no proposal, tasks, design, or spec content.' }),
     ] })
@@ -1003,13 +1187,11 @@ function renderExplorationRow(ex, source, sources, allItems, onSelect) {
     onClick: onClick,
     onKeyDown: function(e) { handleActivateKey(e, onClick) },
     children: [
-      jsxs('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }, children: [
-        jsx('div', { style: { fontWeight: 500, fontSize: '13px', color: 'var(--foreground, #e0e0e0)' }, children: title }),
-        jsx(Badge, { variant: 'outline', style: { fontSize: '10px', flexShrink: 0 }, children: explorationScopeLabel(ex.scope) }),
-      ] }),
-      jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px', minWidth: 0 }, children: [
-        ex.date ? jsx('span', { style: { fontSize: '11px', color: 'var(--muted-foreground, #888)' }, children: ex.date }) : null,
-        jsx('span', { style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--muted-foreground, #888)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }, children: ex.filename || '' }),
+      jsx('div', { 'data-exploration-title': 'true', style: { flex: 1, minWidth: 0, wordBreak: 'break-word', fontWeight: 500, fontSize: '13px', color: 'var(--foreground, inherit)' }, children: title }),
+      jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px', minWidth: 0, flexWrap: 'wrap' }, children: [
+        ex.date ? jsx('span', { 'data-exploration-date': 'true', style: { fontSize: '11px', color: 'var(--muted-foreground, #888)', whiteSpace: 'nowrap', flexShrink: 0 }, children: ex.date }) : null,
+        jsx(Badge, { variant: 'outline', title: explorationScopeLabel(ex.scope), style: { fontSize: '10px', maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }, children: explorationScopeLabel(ex.scope) }),
+        jsx('span', { style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--muted-foreground, #888)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }, children: ex.filename || '' }),
         jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginLeft: 'auto', flexShrink: 0 }, children: [
           canCopy ? jsx(CopyButton, { appearance: 'icon', text: itemRef, label: 'Copy item reference', title: itemRef, stopPropagation: true }) : null,
           ex.token ? jsx('span', { style: { fontFamily: 'monospace', fontSize: '10px', color: 'var(--muted-foreground, #888)' }, children: ex.token }) : null,
@@ -1063,10 +1245,10 @@ function ExplorationBody({ api, sourceId, exploration, ctx }) {
   ] })
 }
 
-function ExplorationDetailDrawer({ api, sourceId, exploration, source, allSources, allItems, ctx, onClose }) {
+function ExplorationDetailDrawer({ api, sourceId, exploration, source, allSources, allItems, ctx, width, onWidthChange, onClose }) {
   var itemRef = buildItemReference(source, exploration, allSources)
   var canCopy = !!itemRef && hasUniqueItemToken(exploration, allItems)
-  return jsx(DetailDrawer, {
+  return jsx(DetailDrawer, { width: width, onWidthChange: onWidthChange,
     title: exploration.title || exploration.name || 'Untitled exploration',
     secondary: exploration.filename || '',
     itemRef: itemRef,
@@ -1096,7 +1278,7 @@ function ReviewsView({ reviews }) {
         ),
         children: [
           jsx(Badge, { variant: 'outline', style: { fontSize: '10px', color: verdictTone(review.verdict) }, children: review.verdict || 'PENDING' }),
-          jsx('span', { style: { fontSize: '12px', color: 'var(--foreground, #e0e0e0)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }, children: review.name }),
+          jsx('span', { style: { fontSize: '12px', color: 'var(--foreground, inherit)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }, children: review.name }),
           review.round != null ? jsx('span', { style: { fontSize: '11px', color: 'var(--muted-foreground, #888)' }, children: 'Round ' + review.round }) : null,
         ]
       }, review.token || review.name)
@@ -1106,13 +1288,50 @@ function ReviewsView({ reviews }) {
   ] })
 }
 
-function CrewCardChips({ cards, ctx }) {
+function CrewCardChips({ cards, ctx, defaultOpen, defaultFilter }) {
   var list = Array.isArray(cards) ? cards : []
-  if (list.length === 0) return null
-  return jsx('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', padding: '4px 12px' }, children: list.map(function(card) {
-    var go = function() { return ctx && ctx.host && ctx.host.navigate ? ctx.host.navigate(card.url) : null }
-    var detail = [card.title, card.assignee, card.board].filter(Boolean).join(' · ')
-    return jsxs('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '2px' }, children: [
+  var grouped = groupCrewCardsByStatus(list)
+  var _open = React.useState(defaultOpen != null ? !!defaultOpen : grouped.total <= CREW_INLINE_LIMIT)
+  var _filter = React.useState(defaultFilter || null)
+  var open = _open[0], setOpen = _open[1]
+  var filter = _filter[0], setFilter = _filter[1]
+  if (grouped.total === 0) return null
+
+  var GLYPH = { running: '\u25cf', review: '\u25d0', blocked: '!', queued: '\u25cb', done: '\u2713' }
+  var tickets = []
+  for (var bi = 0; bi < CREW_BUCKETS.length; bi++) {
+    if (filter && filter !== CREW_BUCKETS[bi]) continue
+    tickets = tickets.concat(grouped[CREW_BUCKETS[bi]])
+  }
+  var showList = open || !!filter
+
+  var summary = jsxs('div', { 'data-crew-summary': 'true', style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', padding: '4px 12px' }, children: [
+    jsx('span', { style: { fontSize: '11px', fontWeight: 600, color: 'var(--muted-foreground, #888)' }, children: 'Crew' }),
+    CREW_BUCKETS.filter(function(k) { return grouped[k].length > 0 }).map(function(k) {
+      return jsx('button', {
+        type: 'button',
+        'data-crew-filter': k,
+        'aria-pressed': filter === k,
+        onClick: function() { setFilter(filter === k ? null : k); if (filter !== k) setOpen(true) },
+        className: cn('rounded-md border px-2 py-0.5 cursor-pointer bg-transparent', filter === k ? 'border-(--ui-focus-border)' : 'border-(--ui-stroke-tertiary)'),
+        style: { fontSize: '11px', color: 'var(--foreground, inherit)', whiteSpace: 'nowrap' },
+        children: GLYPH[k] + ' ' + grouped[k].length + ' ' + k
+      }, k)
+    }),
+    jsx('button', {
+      type: 'button',
+      'data-crew-toggle': 'true',
+      onClick: function() { if (showList) { setOpen(false); setFilter(null) } else { setOpen(true) } },
+      className: 'bg-transparent border-0 cursor-pointer',
+      style: { marginLeft: 'auto', fontSize: '11px', color: 'var(--muted-foreground, #888)' },
+      children: showList ? '\u25b4 Hide' : '\u25be ' + grouped.total + ' tickets'
+    }),
+  ] })
+
+  var rows = !showList ? null : jsx('div', { 'data-crew-list': 'true', style: { maxHeight: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px', padding: '4px 12px' }, children: tickets.map(function(card) {
+    var go = function() { return navigateToCrewCard(ctx, card.url) }
+    var detail = [card.title, card.assignee, card.board].filter(Boolean).join(' \u00b7 ')
+    return jsxs('span', { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }, children: [
       jsx('span', {
         'data-crew-card': card.id,
         role: 'button',
@@ -1121,12 +1340,15 @@ function CrewCardChips({ cards, ctx }) {
         onClick: go,
         onKeyDown: function(e) { handleActivateKey(e, go) },
         className: cn('rounded-md border border-(--ui-stroke-tertiary) px-2 py-0.5 cursor-pointer hover:border-(--ui-focus-border)'),
-        style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--foreground, #e0e0e0)' },
+        style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--foreground, inherit)', flexShrink: 0 },
         children: card.id + ' ' + (card.status || '')
       }),
+      jsx('span', { style: { fontSize: '11px', color: 'var(--muted-foreground, #888)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }, children: [card.title, card.assignee ? '@' + card.assignee : null].filter(Boolean).join(' \u00b7 ') }),
       jsx(CopyButton, { appearance: 'icon', text: card.id, label: 'Copy card id', title: card.id }),
     ] }, card.id)
   }) })
+
+  return jsxs('div', { 'data-crew-chips': 'true', children: [summary, rows] })
 }
 
 function DiscoverControl({ api, sourceId, onRegistered }) {
@@ -1152,13 +1374,13 @@ function DiscoverControl({ api, sourceId, onRegistered }) {
   return jsxs('span', { style: { display: 'inline-flex' }, children: [
     jsx(Button, { variant: 'ghost', size: 'sm', style: { padding: '2px 6px', fontSize: '11px', minWidth: 'auto', flexShrink: 0, whiteSpace: 'nowrap' }, title: 'Discover OpenSpec repositories under this source', 'aria-label': 'Discover sources', onClick: openAndPreview, children: 'Discover' }),
     open ? jsx(Dialog, { open: true, onOpenChange: function() { if (!busy) setOpen(false) }, children: jsxs(DialogContent, { style: { padding: '16px', maxWidth: '520px' }, children: [
-      jsx('h2', { style: { fontSize: '16px', fontWeight: 600, margin: '0 0 12px', color: 'var(--foreground, #e0e0e0)' }, children: 'Discover OpenSpec sources' }),
+      jsx('h2', { style: { fontSize: '16px', fontWeight: 600, margin: '0 0 12px', color: 'var(--foreground, inherit)' }, children: 'Discover OpenSpec sources' }),
       busy && !result ? jsx(Loader, { type: 'lemniscate-bloom' }) : null,
-      error ? jsx('div', { style: { padding: '8px 12px', background: 'var(--destructive-background, #3d1a1a)', borderRadius: '4px', fontSize: '12px', color: 'var(--destructive, #f44336)', marginBottom: '12px' }, children: error }) : null,
+      error ? jsx('div', { style: { padding: '8px 12px', background: BANNER_ERROR, borderRadius: '4px', fontSize: '12px', color: 'var(--foreground, inherit)', marginBottom: '12px' }, children: error }) : null,
       result && candidates.length === 0 ? jsx(EmptyState, { title: 'Nothing found', description: 'No child repositories with an openspec/ folder were found.' }) : null,
       candidates.length > 0 ? jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '12px', maxHeight: '260px', overflowY: 'auto' }, children: candidates.map(function(c) {
         return jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' }, children: [
-          jsx('span', { style: { fontWeight: 500, fontSize: '12px', color: 'var(--foreground, #e0e0e0)' }, children: c.name }),
+          jsx('span', { style: { fontWeight: 500, fontSize: '12px', color: 'var(--foreground, inherit)' }, children: c.name }),
           jsx('span', { style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--muted-foreground, #888)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: c.path, children: c.path }),
           c.alreadyRegistered ? jsx(Badge, { variant: 'outline', style: { fontSize: '10px' }, children: 'registered' }) : null,
         ] }, c.path)
@@ -1183,9 +1405,9 @@ function TaskView({ content }) {
     ] }),
     parsed.sections.map(function(section, i) {
       return jsxs('div', { style: { marginBottom: '12px' }, children: [
-        jsx('div', { style: { fontWeight: 600, fontSize: '14px', marginBottom: '4px', color: 'var(--foreground, #e0e0e0)' }, children: section.title }),
+        jsx('div', { style: { fontWeight: 600, fontSize: '14px', marginBottom: '4px', color: 'var(--foreground, inherit)' }, children: section.title }),
         section.tasks.map(function(task, j) {
-          return jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '2px 0', color: 'var(--foreground, #e0e0e0)' }, children: [
+          return jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '2px 0', color: 'var(--foreground, inherit)' }, children: [
             jsx('span', { style: { color: task.done ? 'var(--primary, #4caf50)' : 'var(--muted-foreground, #888)' }, children: task.done ? '\u2611' : '\u2610' }),
             jsx('span', { style: { fontSize: '13px', textDecoration: task.done ? 'line-through' : 'none', opacity: task.done ? 0.6 : 1 }, children: task.text }),
           ] }, j)
@@ -1200,7 +1422,7 @@ function TaskView({ content }) {
 // Idea detail drawer
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function IdeaDetailDrawer({ api, sourceId, idea, source, allSources, allItems, onClose }) {
+function IdeaDetailDrawer({ api, sourceId, idea, source, allSources, allItems, width, onWidthChange, onClose }) {
   var query = useQuery({
     queryKey: ['openspec', 'idea', sourceId, idea.name || idea.token],
     queryFn: function() { return api.idea(sourceId, idea.name || idea.token) }
@@ -1212,8 +1434,8 @@ function IdeaDetailDrawer({ api, sourceId, idea, source, allSources, allItems, o
   var secondary = ideaSecondaryName(query.data && query.data.name ? query.data.name : (idea.name || ''))
   var token = idea.token || idea.name || ''
 
-  if (query.isLoading) return jsx(DetailDrawer, { title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(Loader, { type: 'lemniscate-bloom' }) })
-  if (query.error) return jsx(DetailDrawer, { title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(RetryErrorState, { title: 'Failed to load idea', description: query.error.message, onRetry: function() { query.refetch() } }) })
+  if (query.isLoading) return jsx(DetailDrawer, { width: width, onWidthChange: onWidthChange, title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(Loader, { type: 'lemniscate-bloom' }) })
+  if (query.error) return jsx(DetailDrawer, { width: width, onWidthChange: onWidthChange, title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(RetryErrorState, { title: 'Failed to load idea', description: query.error.message, onRetry: function() { query.refetch() } }) })
 
   var data = query.data || {}
 
@@ -1225,7 +1447,7 @@ function IdeaDetailDrawer({ api, sourceId, idea, source, allSources, allItems, o
   var content = data.content || ''
   var stripped = stripFrontmatter(content)
 
-  return jsx(DetailDrawer, { title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(MarkdownView, { content: stripped }) })
+  return jsx(DetailDrawer, { width: width, onWidthChange: onWidthChange, title: title, secondary: secondary, itemRef: itemRef, canCopy: canCopy, token: token, onClose: onClose, children: jsx(MarkdownView, { content: stripped }) })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1258,7 +1480,7 @@ function SpecsDetailView({ specs }) {
       jsx('select', {
         value: selectedIdx,
         onChange: function(e) { setSelectedIdx(parseInt(e.target.value, 10)) },
-        style: { padding: '4px 8px', borderRadius: '4px', border: '1px solid var(--ui-border, #333)', background: 'var(--input-background, #2a2a2a)', color: 'var(--foreground, #e0e0e0)' },
+        style: { padding: '4px 8px', borderRadius: '4px', border: BORDER_SUBTLE, background: 'var(--ui-bg-quinary, transparent)', color: 'var(--foreground, inherit)' },
         children: specs.map(function(s, i) { return jsx('option', { value: i, children: s.path || s.title || ('Spec ' + (i + 1)) }, i) })
       })
     ] }) : null,
@@ -1305,12 +1527,12 @@ function SemanticDiffView({ data }) {
   if (!data) return null
   var items = normalizeSemanticGroups(data)
   return jsxs('div', { style: { padding: '8px' }, children: [
-    jsx('div', { style: { fontWeight: 600, marginBottom: '8px', color: 'var(--foreground, #e0e0e0)' }, children: 'Semantic Changes' }),
+    jsx('div', { style: { fontWeight: 600, marginBottom: '8px', color: 'var(--foreground, inherit)' }, children: 'Semantic Changes' }),
     items.map(function(item, i) {
-      return jsxs('div', { style: { marginBottom: '8px', padding: '8px', background: 'var(--card-background, #1a1a1a)', borderRadius: '4px', border: '1px solid var(--ui-border, #333)' }, children: [
+      return jsxs('div', { style: { marginBottom: '8px', padding: '8px', background: SURFACE_CODE, borderRadius: '4px', border: BORDER_SUBTLE }, children: [
         jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }, children: [
           jsx('span', { style: { fontSize: '10px', fontWeight: 600, padding: '1px 5px', borderRadius: '3px', background: item.color, color: '#fff' }, children: item.label }),
-          item.name ? jsx('span', { style: { fontWeight: 500, color: 'var(--foreground, #e0e0e0)' }, children: item.name }) : null,
+          item.name ? jsx('span', { style: { fontWeight: 500, color: 'var(--foreground, inherit)' }, children: item.name }) : null,
         ] }),
         item.description ? jsx('div', { style: { fontSize: '12px', color: 'var(--muted-foreground, #888)', marginBottom: '2px' }, children: item.description }) : null,
         item.before != null && item.before !== '' ? jsx('div', { style: { color: 'var(--destructive, #f44336)', fontSize: '12px', marginBottom: '2px' }, children: '- ' + item.before }) : null,
@@ -1324,11 +1546,11 @@ function SplitDiffView({ before, after }) {
   return jsxs('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', padding: '8px' }, children: [
     jsxs('div', { children: [
       jsx('div', { style: { fontWeight: 500, marginBottom: '4px', color: 'var(--muted-foreground, #888)', fontSize: '12px' }, children: 'Before' }),
-      jsx('pre', { style: { fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', padding: '8px', background: 'var(--editor-background, #1e1e1e)', borderRadius: '4px', color: 'var(--foreground, #e0e0e0)', margin: 0 }, children: before || '' }),
+      jsx('pre', { style: { fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', padding: '8px', background: SURFACE_CODE, border: BORDER_SUBTLE, borderRadius: '4px', color: 'var(--foreground, inherit)', margin: 0 }, children: before || '' }),
     ] }),
     jsxs('div', { children: [
       jsx('div', { style: { fontWeight: 500, marginBottom: '4px', color: 'var(--muted-foreground, #888)', fontSize: '12px' }, children: 'After' }),
-      jsx('pre', { style: { fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', padding: '8px', background: 'var(--editor-background, #1e1e1e)', borderRadius: '4px', color: 'var(--foreground, #e0e0e0)', margin: 0 }, children: after || '' }),
+      jsx('pre', { style: { fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', padding: '8px', background: SURFACE_CODE, border: BORDER_SUBTLE, borderRadius: '4px', color: 'var(--foreground, inherit)', margin: 0 }, children: after || '' }),
     ] }),
   ] })
 }
@@ -1336,13 +1558,13 @@ function SplitDiffView({ before, after }) {
 function RawDiffView({ diff }) {
   if (!diff) return null
   var lines = Array.isArray(diff) ? diff : String(diff).split('\n')
-  return jsxs('pre', { style: { fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', padding: '8px', background: 'var(--editor-background, #1e1e1e)', borderRadius: '4px', margin: 0 }, children: lines.map(function(line, i) {
+  return jsxs('pre', { style: { fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', padding: '8px', background: SURFACE_CODE, border: BORDER_SUBTLE, borderRadius: '4px', margin: 0 }, children: lines.map(function(line, i) {
     var cls = classifyDiffLine(line)
     var style = { display: 'block', padding: '1px 4px' }
     if (cls === 'added') style.color = 'var(--primary, #4caf50)'
     else if (cls === 'removed') style.color = 'var(--destructive, #f44336)'
     else if (cls === 'hunk') style.color = 'var(--muted-foreground, #888)'
-    else style.color = 'var(--foreground, #e0e0e0)'
+    else style.color = 'var(--foreground, inherit)'
     return jsx('span', { style: style, children: line + '\n' }, i)
   }) })
 }
@@ -1415,8 +1637,9 @@ function WorkView({ api, source, sources, onSelectItem, showArchived, onToggleAr
 // Specs view
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function SpecsView({ api, sourceId }) {
+function SpecsView({ api, sourceId, ctx }) {
   var [worktree, setWorktree] = React.useState(false)
+  var [sidebarWidth, setSidebarWidth] = React.useState(readStoredWidth(ctx, 'specsSidebarWidth', clampSpecsSidebarWidth))
 
   var query = useQuery({
     queryKey: ['openspec', 'spec-browser', sourceId, worktree],
@@ -1455,14 +1678,14 @@ function SpecsView({ api, sourceId }) {
       description: worktree ? 'The working tree matches HEAD for all spec files.' : 'No spec files are registered for this source.',
     }) : null,
     !query.isLoading && files.length > 0 ? jsxs('div', { style: { display: 'flex', gap: '12px', flex: 1, overflow: 'hidden' }, children: [
-      jsxs('div', { style: { width: '240px', flexShrink: 0, overflow: 'auto' }, children: [
+      jsxs('div', { 'data-specs-sidebar': 'true', style: { width: sidebarWidth + 'px', flexShrink: 0, overflow: 'auto' }, children: [
         files.map(function(file) {
           var path = file.path || file.name || file
           var isSelected = selectedFile === path
           return jsxs('div', {
             className: cn(
               'px-3 py-2 cursor-pointer text-sm rounded-md',
-              isSelected ? 'bg-(--ui-selected-background, #2a2a2a) text-foreground' : 'text-muted-foreground hover:bg-(--ui-hover-background, #1a1a1a)'
+              isSelected ? 'bg-(--ui-control-active-background) text-foreground font-medium' : 'text-muted-foreground hover:bg-(--ui-control-hover-background) hover:text-foreground'
             ),
             onClick: function() { setSelectedFile(path) },
             children: [
@@ -1472,6 +1695,31 @@ function SpecsView({ api, sourceId }) {
           }, path)
         }),
       ] }),
+      jsx('div', {
+        role: 'separator',
+        'aria-orientation': 'vertical',
+        'aria-label': 'Resize specs sidebar',
+        'aria-valuenow': sidebarWidth,
+        'aria-valuemin': SPECS_SIDEBAR_MIN,
+        'aria-valuemax': SPECS_SIDEBAR_MAX,
+        'data-specs-resize-handle': 'true',
+        tabIndex: 0,
+        title: 'Drag to resize (double-click to reset)',
+        onPointerDown: function(e) {
+          beginResize(e, sidebarWidth, 1, clampSpecsSidebarWidth,
+            function(w) { setSidebarWidth(w) },
+            function(w) { setSidebarWidth(w); writeStoredWidth(ctx, 'specsSidebarWidth', w) })
+        },
+        onDoubleClick: function() { setSidebarWidth(SPECS_SIDEBAR_DEFAULT); writeStoredWidth(ctx, 'specsSidebarWidth', SPECS_SIDEBAR_DEFAULT) },
+        onKeyDown: function(e) {
+          var step = e && e.key === 'ArrowRight' ? 24 : (e && e.key === 'ArrowLeft' ? -24 : 0)
+          if (!step) return
+          if (typeof e.preventDefault === 'function') e.preventDefault()
+          var w = clampSpecsSidebarWidth(sidebarWidth + step)
+          setSidebarWidth(w); writeStoredWidth(ctx, 'specsSidebarWidth', w)
+        },
+        style: { width: '6px', flexShrink: 0, cursor: 'col-resize', alignSelf: 'stretch', touchAction: 'none', marginLeft: '-9px', marginRight: '-9px', zIndex: 1 }
+      }),
       jsxs('div', { style: { flex: 1, overflow: 'auto' }, children: [
         worktree && selectedFile ? jsx(WorktreeDetailView, { sourceId: sourceId, file: selectedFile, files: files }) : null,
         !worktree && selectedFile && specQuery.isLoading ? jsx(Loader, { type: 'lemniscate-bloom' }) : null,
@@ -1490,7 +1738,7 @@ function WorktreeDetailView({ sourceId, file, files }) {
 
   return jsxs('div', { style: { padding: '12px' }, children: [
     jsxs('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }, children: [
-      jsx('h3', { style: { fontSize: '14px', fontWeight: 500, margin: 0, color: 'var(--foreground, #e0e0e0)' }, children: file }),
+      jsx('h3', { style: { fontSize: '14px', fontWeight: 500, margin: 0, color: 'var(--foreground, inherit)' }, children: file }),
       fileInfo.status ? jsx(Badge, { variant: 'outline', children: fileInfo.status }) : null,
     ] }),
     jsx(DiffModePanel, { data: data }),
@@ -1507,6 +1755,7 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
   var sourcesQuery = useQuery({
     queryKey: ['openspec', 'sources'],
     queryFn: function() { return api.sources() },
+    refetchInterval: POLL_INTERVAL_MS,
   })
 
   var [selectedSourceId, setSelectedSourceId] = React.useState(sessionStore ? sessionStore.selectedSourceId : null)
@@ -1519,6 +1768,20 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
   var [removeError, setRemoveError] = React.useState('')
   var [initBusy, setInitBusy] = React.useState(false)
   var [initError, setInitError] = React.useState('')
+  var [drawerWidth, setDrawerWidth] = React.useState(readStoredWidth(ctx, 'drawerWidth', clampDrawerWidth))
+
+  // Entering via the full-page `#/openspec` hash route would hide the workspace tab bar and drop the
+  // tab on the next switch: re-enter through the router so /openspec docks as a persistent route tile.
+  React.useEffect(function() {
+    if (typeof window === 'undefined') return
+    var hash = String((window.location && window.location.hash) || '')
+    if (hash.indexOf('#/openspec') === 0) navigateToCrewCard(ctx, '/openspec')
+  }, [])
+
+  function handleDrawerWidth(w, commit) {
+    setDrawerWidth(w)
+    if (commit) writeStoredWidth(ctx, 'drawerWidth', w)
+  }
 
   // Resolve selection after refreshed /sources data: restore the retained source
   // while its ID remains present (including invalid sources), otherwise fall back
@@ -1632,16 +1895,16 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
   }
 
   return jsxs('div', { className: cn('relative flex flex-col h-full overflow-hidden'), children: [
-    jsx('style', { children: SOURCE_TRIGGER_HOVER_CSS }),
+    jsx('style', { 'data-openspec-styles': 'true', children: OPENSPEC_PAGE_CSS }),
 
     // Header
-    jsxs('div', { style: { padding: '6px 16px', borderBottom: '1px solid var(--ui-border, #333)', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'nowrap' }, children: [
-      jsx('h1', { style: { fontSize: '13px', fontWeight: 600, margin: 0, color: 'var(--foreground, #e0e0e0)' }, children: 'OpenSpec' }),
+    jsxs('div', { style: { padding: '6px 16px', borderBottom: BORDER_SUBTLE, display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'nowrap' }, children: [
+      jsx('h1', { style: { fontSize: '13px', fontWeight: 600, margin: 0, color: 'var(--foreground, inherit)' }, children: 'OpenSpec' }),
       selectedSource && selectedSource.path ? jsx('span', { style: { minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: '11px', color: 'var(--muted-foreground, #888)' }, title: selectedSource.path, children: selectedSource.path }) : null,
     ] }),
 
     // Source controls and path line
-    jsxs('div', { style: { padding: '6px 16px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: 'var(--muted-foreground, #888)', borderBottom: '1px solid var(--ui-border, #333)' }, children: [
+    jsxs('div', { style: { padding: '6px 16px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: 'var(--muted-foreground, #888)', borderBottom: BORDER_SUBTLE }, children: [
       selectedSource ? jsx(CopyButton, { appearance: 'icon', text: sourceRef, label: 'Copy source reference', title: sourceRef, disabled: !sourceRef }) : null,
       jsx(Select, {
         value: selectedSourceId || undefined,
@@ -1660,7 +1923,7 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
     ] }),
 
     // View switch
-    jsxs('div', { style: { padding: '8px 16px', borderBottom: '1px solid var(--ui-border, #333)', display: 'flex', alignItems: 'center', gap: '12px' }, children: [
+    jsxs('div', { style: { padding: '8px 16px', borderBottom: BORDER_SUBTLE, display: 'flex', alignItems: 'center', gap: '12px' }, children: [
       jsx(SegmentedControl, {
         value: view,
         onChange: setView,
@@ -1680,7 +1943,7 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
     ] }),
 
     // Invalid source warning
-    selectedSource && selectedSource.valid === false ? jsx('div', { style: { padding: '12px 16px', background: 'var(--warning-background, #fff3cd)', borderRadius: '4px', margin: '8px 16px', fontSize: '13px' }, children: jsxs('div', { children: [
+    selectedSource && selectedSource.valid === false ? jsx('div', { style: { padding: '12px 16px', background: BANNER_WARNING, color: 'var(--foreground, inherit)', borderRadius: '4px', margin: '8px 16px', fontSize: '13px' }, children: jsxs('div', { children: [
       jsxs('div', { children: [
         jsx('strong', { children: 'Invalid source' }),
         selectedSource.error ? ': ' + selectedSource.error : '',
@@ -1696,25 +1959,25 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
         ? jsx(WorkView, { key: selectedSource.id, api: api, source: selectedSource, sources: sources, showArchived: showArchived, onToggleArchived: handleToggleArchived, onSelectItem: onSelectItem })
         : view === 'explorations'
           ? jsx(ExplorationsView, { key: selectedSource.id, source: selectedSource, sources: sources, onSelectItem: onSelectItem })
-          : jsx(SpecsView, { key: selectedSource.id, api: api, sourceId: selectedSource.id })
+          : jsx(SpecsView, { key: selectedSource.id, api: api, sourceId: selectedSource.id, ctx: ctx })
     ) : selectedSource && selectedSource.valid === false ? null : jsx(EmptyState, {
       title: sources.length === 0 ? 'No sources registered' : 'Select a source',
       description: sources.length === 0 ? 'Add a source to get started.' : 'Choose a source to view its OpenSpec project.'
     }) }),
 
     // Detail drawer — synchronous gate: reject stale item from different source
-    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'change' && selectedSource && selectedSource.valid !== false ? jsx(ChangeDetailDrawer, { api: api, sourceId: selectedSourceId, change: selectedItem.item, source: selectedSource, allSources: sources, allItems: allItems, ctx: ctx, onSelectExploration: onSelectItem, onClose: function() { setSelectedItem(null) } }) : null,
-    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'exploration' && selectedSource && selectedSource.valid !== false ? jsx(ExplorationDetailDrawer, { api: api, sourceId: selectedSourceId, exploration: selectedItem.item, source: selectedSource, allSources: sources, allItems: (selectedSource.openspec && selectedSource.openspec.explorations) || [], ctx: ctx, onClose: function() { setSelectedItem(null) } }) : null,
-    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'idea' && selectedSource && selectedSource.valid !== false ? jsx(IdeaDetailDrawer, { api: api, sourceId: selectedSourceId, idea: selectedItem.item, source: selectedSource, allSources: sources, allItems: allItems, onClose: function() { setSelectedItem(null) } }) : null,
+    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'change' && selectedSource && selectedSource.valid !== false ? jsx(ChangeDetailDrawer, { api: api, sourceId: selectedSourceId, change: selectedItem.item, source: selectedSource, allSources: sources, allItems: allItems, ctx: ctx, width: drawerWidth, onWidthChange: handleDrawerWidth, onSelectExploration: onSelectItem, onClose: function() { setSelectedItem(null) } }) : null,
+    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'exploration' && selectedSource && selectedSource.valid !== false ? jsx(ExplorationDetailDrawer, { api: api, sourceId: selectedSourceId, exploration: selectedItem.item, source: selectedSource, allSources: sources, allItems: (selectedSource.openspec && selectedSource.openspec.explorations) || [], ctx: ctx, width: drawerWidth, onWidthChange: handleDrawerWidth, onClose: function() { setSelectedItem(null) } }) : null,
+    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'idea' && selectedSource && selectedSource.valid !== false ? jsx(IdeaDetailDrawer, { api: api, sourceId: selectedSourceId, idea: selectedItem.item, source: selectedSource, allSources: sources, allItems: allItems, width: drawerWidth, onWidthChange: handleDrawerWidth, onClose: function() { setSelectedItem(null) } }) : null,
 
     // Source add/edit dialog
     sourceDialog ? jsx(SourceDialog, { mode: sourceDialog.mode, api: api, source: sourceDialog.mode === 'edit' ? selectedSource : null, onClose: function() { setSourceDialog(null) }, onSaved: onSourceSaved }) : null,
 
     // Remove source confirmation dialog
     removeConfirm ? jsx(Dialog, { open: true, onOpenChange: function() { if (!removeBusy) { setRemoveConfirm(null); setRemoveError('') } }, children: jsxs(DialogContent, { style: { padding: '16px', maxWidth: '400px' }, children: [
-      jsx('h2', { style: { fontSize: '16px', fontWeight: 600, margin: '0 0 8px', color: 'var(--foreground, #e0e0e0)' }, children: 'Remove source' }),
+      jsx('h2', { style: { fontSize: '16px', fontWeight: 600, margin: '0 0 8px', color: 'var(--foreground, inherit)' }, children: 'Remove source' }),
       jsx('p', { style: { fontSize: '13px', color: 'var(--muted-foreground, #888)', margin: '0 0 12px' }, children: 'Remove source "' + (removeConfirm.name || removeConfirm.id) + '"? This unregisters the source from OpenSpec but does not delete any files.' }),
-      removeError ? jsx('div', { style: { padding: '8px 12px', background: 'var(--destructive-background, #3d1a1a)', borderRadius: '4px', fontSize: '12px', color: 'var(--destructive, #f44336)', marginBottom: '12px' }, children: removeError }) : null,
+      removeError ? jsx('div', { style: { padding: '8px 12px', background: BANNER_ERROR, borderRadius: '4px', fontSize: '12px', color: 'var(--foreground, inherit)', marginBottom: '12px' }, children: removeError }) : null,
       jsxs('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '8px' }, children: [
         jsx(Button, { variant: 'outline', size: 'sm', onClick: function() { setRemoveConfirm(null); setRemoveError('') }, disabled: removeBusy, children: 'Cancel' }),
         jsx(Button, { variant: 'destructive', size: 'sm', onClick: confirmRemove, disabled: removeBusy, children: removeBusy ? 'Removing...' : 'Remove' }),
@@ -1738,6 +2001,7 @@ var plugin = {
       {
         id: 'page',
         area: ROUTES_AREA,
+        title: 'OpenSpec',
         data: { path: '/openspec' },
         render: function() { return jsx(OpenSpecPage, { api: api, sessionStore: sessionStore, ctx: ctx }) }
       },
@@ -1779,6 +2043,16 @@ export const __test = Object.freeze({
   groupByStatus: groupByStatus,
   normalizeSequencePosition: normalizeSequencePosition,
   sortItems: sortItems,
+  groupCrewCardsByStatus: groupCrewCardsByStatus,
+  itemActivityRank: itemActivityRank,
+  effectiveChangeStatus: effectiveChangeStatus,
+  crewProgressLabel: crewProgressLabel,
+  clampDrawerWidth: clampDrawerWidth,
+  clampSpecsSidebarWidth: clampSpecsSidebarWidth,
+  navigateToCrewCard: navigateToCrewCard,
+  CardCrewPills: CardCrewPills,
+  SpecsView: SpecsView,
+  renderExplorationRow: renderExplorationRow,
   filterItems: filterItems,
   toggleArchived: toggleArchived,
   parseTasks: parseTasks,

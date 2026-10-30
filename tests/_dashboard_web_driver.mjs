@@ -23,7 +23,7 @@ for (const n of ['Button', 'Card', 'CardContent', 'Badge', 'Input', 'Label', 'Se
 const sandbox = {
   console,
   navigator: { clipboard: { writeText() { return Promise.resolve() } } },
-  setTimeout,
+  setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {}, isFinite, NaN,
   URLSearchParams,
   encodeURIComponent,
   decodeURIComponent,
@@ -63,7 +63,7 @@ sandbox.window.window = sandbox.window
 sandbox.React = sandbox.window.__HERMES_PLUGIN_SDK__.React
 vm.createContext(sandbox)
 
-const injected = src.replace(/\}\)\(\);\s*$/, 'window.__OS_TEST__ = { ReviewsTab: ReviewsTab, CrewCards: CrewCards, ExplorationList: ExplorationList, ExplorationsPanel: ExplorationsPanel, ChangeDetailTabs: ChangeDetailTabs, DiscoverDialog: DiscoverDialog, ExplorationDialog: ExplorationDialog, Toolbar: Toolbar, scopeLabel: scopeLabel, verdictClass: verdictClass, sortExplorations: sortExplorations, getExploration: getExploration, discoverSources: discoverSources };\n})();')
+const injected = src.replace(/\}\)\(\);\s*$/, 'window.__OS_TEST__ = { ReviewsTab: ReviewsTab, CrewCards: CrewCards, ExplorationList: ExplorationList, ExplorationsPanel: ExplorationsPanel, ChangeDetailTabs: ChangeDetailTabs, DiscoverDialog: DiscoverDialog, ExplorationDialog: ExplorationDialog, Toolbar: Toolbar, Board: Board, DetailDialog: DetailDialog, Modal: Modal, scopeLabel: scopeLabel, verdictClass: verdictClass, sortExplorations: sortExplorations, getExploration: getExploration, discoverSources: discoverSources };\n})();')
 if (injected === src) throw new Error('could not inject test export')
 vm.runInContext(injected, sandbox, { filename: 'dashboard/dist/index.js' })
 const T = sandbox.window.__OS_TEST__
@@ -160,6 +160,43 @@ const SRC = {
   const treeNo = expand(T.Toolbar({ sources: [], activeId: null, onSelect() {}, onRefresh() {}, onAdd() {}, onEdit() {}, onRemove() {}, onDiscover() {} }))
   const btnNo = collect(treeNo, n => n.type === C.Button && text(n) === 'Discover')[0]
   R.toolbarNoSource = { disabled: btnNo ? !!btnNo.props.disabled : null }
+}
+
+{
+  const twenty = Array.from({ length: 20 }, (_, i) => ({
+    id: 't_' + i, title: 'T' + i, status: ['running', 'review', 'blocked', 'todo', 'done'][i % 5], url: '/crew?card=t_' + i,
+  }))
+  const collapsed = expand(T.CrewCards({ cards: twenty }))
+  const boardSrc = {
+    id: 's1', name: 'demoapp', path: '/r', valid: true,
+    openspec: {
+      ideas: [],
+      changes: [
+        { id: '1', name: 'beta', title: 'Beta', token: 'os_b', status: 'in_progress', sequence: { position: 1 }, crewCards: [{ id: 'd1', status: 'done', url: '/crew?card=d1' }] },
+        { id: '2', name: 'alpha', title: 'Alpha', token: 'os_a', status: 'todo', sequence: { position: 10 }, crewCards: [{ id: 'r1', status: 'running', url: '/crew?card=r1' }] },
+      ],
+    },
+  }
+  const btree = expand(T.Board({ source: boardSrc, onSelectItem() {} }))
+  const cards = collect(btree, n => n.type === 'button' && /\bos-card\b/.test(n.props.className || ''))
+  const dlg = expand(T.DetailDialog({
+    source: { id: 's1', name: 'workspaces' },
+    item: { name: 'demo', title: 'Demo', token: 'os_e80720', status: 'todo', taskStats: { done: 0, total: 7 }, crewCards: [
+      { id: 'c1', status: 'done', url: '/crew?card=c1' }, { id: 'c2', status: 'done', url: '/crew?card=c2' },
+      { id: 'c3', status: 'done', url: '/crew?card=c3' }, { id: 'c4', status: 'running', url: '/crew?card=c4' },
+      { id: 'c5', status: 'todo', url: '/crew?card=c5' },
+    ] },
+    onClose() {},
+  }))
+  R.slice3 = {
+    collapsed20Links: collect(collapsed, n => n.type === 'a').length,
+    collapsed20Summary: text(collapsed),
+    cardOrder: cards.map(c => text(c)),
+    firstRadar: cards[0] && cards[0].props['data-radar'],
+    secondRadar: (cards[1] && cards[1].props['data-radar']) || null,
+    dlgBadges: collect(dlg, n => n.type === C.Badge).map(b => text(b)),
+    hasModalSash: collect(dlg, n => n.props && n.props.className === 'os-modal-sash').length === 1,
+  }
 }
 
 process.stdout.write(JSON.stringify(R))

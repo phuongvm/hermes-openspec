@@ -161,13 +161,37 @@
   // ── Modal (lightweight, no Dialog in SDK) ─────────────────────────────
   function Modal(_ref3) {
     var title = _ref3.title, onClose = _ref3.onClose, children = _ref3.children, wide = _ref3.wide;
+    var _w = useState(function () { return readPref("drawerWidth", DRAWER_WIDTH_MIN, DRAWER_WIDTH_MAX, DRAWER_WIDTH_DEFAULT); });
+    var modalW = _w[0], setModalW = _w[1];
     useEffect(function () {
       function onKey(e) { if (e.key === "Escape") onClose(); }
       window.addEventListener("keydown", onKey);
       return function () { window.removeEventListener("keydown", onKey); };
     }, [onClose]);
+    function startResize(e) {
+      e.preventDefault();
+      var sx = e.clientX;
+      function move(ev) { setModalW(clampVal(modalW + (ev.clientX - sx) * 2, DRAWER_WIDTH_MIN, DRAWER_WIDTH_MAX, DRAWER_WIDTH_DEFAULT)); }
+      function up(ev) {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        writePref("drawerWidth", clampVal(modalW + (ev.clientX - sx) * 2, DRAWER_WIDTH_MIN, DRAWER_WIDTH_MAX, DRAWER_WIDTH_DEFAULT));
+      }
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    }
     return h("div", { className: "os-overlay", onClick: onClose },
-      h("div", { className: cn("os-modal", wide && "os-modal-wide"), onClick: function (e) { e.stopPropagation(); } },
+      h("div", {
+        className: cn("os-modal", wide && "os-modal-wide"),
+        style: wide ? { maxWidth: modalW + "px" } : undefined,
+        onClick: function (e) { e.stopPropagation(); }
+      },
+        wide ? h("div", {
+          role: "separator", "aria-orientation": "vertical", className: "os-modal-sash",
+          title: "Drag to resize (double-click to reset)",
+          onPointerDown: startResize,
+          onDoubleClick: function () { setModalW(DRAWER_WIDTH_DEFAULT); writePref("drawerWidth", DRAWER_WIDTH_DEFAULT); }
+        }) : null,
         h("div", { className: "os-modal-head" },
           h("span", { className: "os-modal-title" }, title),
           h("button", { className: "os-icon-btn", onClick: onClose, "aria-label": "Close" }, h(Icon, { d: ICO.close }))
@@ -212,15 +236,120 @@
     });
   }
 
+  var CREW_BUCKETS = ["running", "review", "blocked", "queued", "done"];
+  var CREW_INLINE_LIMIT = 3;
+  var POLL_INTERVAL_MS = 5000;
+  var SPECS_SIDEBAR_DEFAULT = 260, SPECS_SIDEBAR_MIN = 180, SPECS_SIDEBAR_MAX = 480;
+  var DRAWER_WIDTH_DEFAULT = 720, DRAWER_WIDTH_MIN = 380, DRAWER_WIDTH_MAX = 960;
+
+  function normalizeStatus(status) {
+    var s = String(status || "").toLowerCase();
+    if (s === "in-progress" || s === "inprogress" || s === "in_progress") return "in-progress";
+    if (s === "ideas" || s === "draft" || s === "todo" || s === "done" || s === "archived") return s;
+    return "todo";
+  }
+
+  function normalizeSequencePosition(sequence) {
+    var position = sequence && typeof sequence === "object" ? sequence.position : sequence;
+    return typeof position === "number" && isFinite(position) ? position : null;
+  }
+
+  function groupCrewCardsByStatus(cards) {
+    var g = { total: 0, running: [], review: [], blocked: [], queued: [], done: [], activeState: "idle" };
+    var list = Array.isArray(cards) ? cards : [];
+    for (var i = 0; i < list.length; i++) {
+      var card = list[i];
+      if (!card) continue;
+      var st = String(card.status || "").toLowerCase();
+      if (st === "archived") continue;
+      g.total++;
+      if (st === "running") g.running.push(card);
+      else if (st === "review") g.review.push(card);
+      else if (st === "blocked" || st === "triage") g.blocked.push(card);
+      else if (st === "done" || st === "completed") g.done.push(card);
+      else g.queued.push(card);
+    }
+    if (g.running.length > 0) g.activeState = "running";
+    else if (g.review.length > 0) g.activeState = "review";
+    else if (g.blocked.length > 0) g.activeState = "blocked";
+    else if (g.queued.length > 0) g.activeState = "queued";
+    else if (g.done.length > 0) g.activeState = "done";
+    return g;
+  }
+
+  function itemActivityRank(item) {
+    var g = groupCrewCardsByStatus(item && Array.isArray(item.crewCards) ? item.crewCards : []);
+    if (g.running.length > 0) return 0;
+    if (g.review.length > 0) return 1;
+    if (g.blocked.length > 0) return 2;
+    if (g.queued.length > 0) return 3;
+    return 4;
+  }
+
+  function effectiveChangeStatus(item) {
+    var base = normalizeStatus(item && (item.status || item.state || item.phase));
+    if (base !== "todo" && base !== "draft") return base;
+    var g = groupCrewCardsByStatus(item && Array.isArray(item.crewCards) ? item.crewCards : []);
+    return (g.running.length > 0 || g.review.length > 0 || g.done.length > 0) ? "in-progress" : base;
+  }
+
+  function sortItems(items) {
+    return (items || []).slice().sort(function (a, b) {
+      var ra = itemActivityRank(a), rb = itemActivityRank(b);
+      if (ra !== rb) return ra - rb;
+      var sa = normalizeSequencePosition(a.sequence), sb = normalizeSequencePosition(b.sequence);
+      if (sa == null) sa = 9999;
+      if (sb == null) sb = 9999;
+      if (sa !== sb) return sa - sb;
+      var ta = (a.title || a.name || "").toLowerCase(), tb = (b.title || b.name || "").toLowerCase();
+      return ta < tb ? -1 : (ta > tb ? 1 : 0);
+    });
+  }
+
+  function clampVal(px, min, max, fallback) {
+    var n = (px == null || px === "") ? NaN : Number(px);
+    if (!isFinite(n)) n = fallback;
+    return Math.min(max, Math.max(min, Math.round(n)));
+  }
+  function readPref(key, min, max, fallback) {
+    try { return clampVal(window.localStorage && window.localStorage.getItem("openspec." + key), min, max, fallback); } catch (e) { return fallback; }
+  }
+  function writePref(key, v) {
+    try { if (window.localStorage) window.localStorage.setItem("openspec." + key, String(v)); } catch (e) {}
+  }
+
   function CrewCards(_ref) {
     var cards = _ref.cards;
-    if (!nonEmpty(cards)) return null;
-    return h("div", { className: "os-crew-cards" }, cards.map(function (c) {
-      return h("span", { key: c.id, className: "os-crew-card" },
-        h("a", { className: "os-crew-link", href: c.url, title: [c.title, c.assignee, c.board].filter(Boolean).join(" · ") }, c.id + " " + (c.status || "")),
-        h(CopyChip, { text: c.id })
-      );
-    }));
+    var grouped = groupCrewCardsByStatus(cards);
+    var _o = useState(grouped.total <= CREW_INLINE_LIMIT), _f = useState(null);
+    var open = _o[0], setOpen = _o[1], filter = _f[0], setFilter = _f[1];
+    if (!grouped.total) return null;
+    var GLYPH = { running: "\u25cf", review: "\u25d0", blocked: "!", queued: "\u25cb", done: "\u2713" };
+    var show = open || !!filter;
+    var tickets = [];
+    CREW_BUCKETS.forEach(function (k) { if (!filter || filter === k) tickets = tickets.concat(grouped[k]); });
+    return h("div", { className: "os-crew-widget" },
+      h("div", { className: "os-crew-summary" },
+        h("span", { className: "os-crew-label" }, "Crew"),
+        CREW_BUCKETS.filter(function (k) { return grouped[k].length > 0; }).map(function (k) {
+          return h("button", {
+            key: k, type: "button", className: cn("os-crew-pill", "os-crew-pill-" + k, filter === k && "os-crew-pill-active"),
+            onClick: function () { setFilter(filter === k ? null : k); if (filter !== k) setOpen(true); }
+          }, GLYPH[k] + " " + grouped[k].length + " " + k);
+        }),
+        h("button", {
+          type: "button", className: "os-crew-toggle",
+          onClick: function () { if (show) { setOpen(false); setFilter(null); } else { setOpen(true); } }
+        }, show ? "\u25b4 Hide" : "\u25be " + grouped.total + " tickets")
+      ),
+      show ? h("div", { className: "os-crew-cards" }, tickets.map(function (c) {
+        return h("span", { key: c.id, className: "os-crew-card" },
+          h("a", { className: "os-crew-link", href: c.url, title: [c.title, c.assignee, c.board].filter(Boolean).join(" \u00b7 ") }, c.id + " " + (c.status || "")),
+          c.title ? h("span", { className: "os-crew-title" }, c.title + (c.assignee ? " \u00b7 @" + c.assignee : "")) : null,
+          h(CopyChip, { text: c.id })
+        );
+      })) : null
+    );
   }
 
   function ReviewsTab(_ref) {
@@ -246,12 +375,14 @@
     var items = _ref.items, source = _ref.source, onSelect = _ref.onSelect;
     return h("div", { className: "os-expl-list" }, sortExplorations(items).map(function (ex) {
       return h("button", { key: ex.token || ex.name, className: "os-expl-row", onClick: function () { onSelect(ex); } },
-        h("span", { className: "os-expl-title" }, ex.title || ex.name),
-        h(Badge, { variant: "outline" }, scopeLabel(ex.scope)),
-        ex.date ? h("span", { className: "os-expl-date" }, ex.date) : null,
-        h("span", { className: "os-expl-file" }, ex.filename),
-        ex.token ? h("span", { className: "os-expl-token", title: "Copy: " + source.name + "/" + ex.token,
-          onClick: function (e) { e.stopPropagation(); navigator.clipboard.writeText(source.name + "/" + ex.token); } }, ex.token) : null
+        h("div", { className: "os-expl-title" }, ex.title || ex.name),
+        h("div", { className: "os-expl-meta" },
+          ex.date ? h("span", { className: "os-expl-date" }, ex.date) : null,
+          h(Badge, { variant: "outline", className: "os-expl-scope" }, scopeLabel(ex.scope)),
+          h("span", { className: "os-expl-file" }, ex.filename),
+          ex.token ? h("span", { className: "os-expl-token", title: "Copy: " + source.name + "/" + ex.token,
+            onClick: function (e) { e.stopPropagation(); navigator.clipboard.writeText(source.name + "/" + ex.token); } }, ex.token) : null
+        )
       );
     }));
   }
@@ -391,20 +522,14 @@
              (it.name || "").toLowerCase().indexOf(filter) >= 0 ||
              (it.token || "").toLowerCase().indexOf(filter) >= 0;
     }
-    function sequencePosition(it) {
-      return it && it.sequence && typeof it.sequence.position === "number" ? it.sequence.position : Number.MAX_SAFE_INTEGER;
-    }
-    function sortBySequence(items) {
-      return (items || []).slice().sort(function (a, b) {
-        var ap = sequencePosition(a), bp = sequencePosition(b);
-        if (ap !== bp) return ap - bp;
-        return String(a.title || a.name || "").localeCompare(String(b.title || b.name || ""));
-      });
-    }
     var byCol = {};
     COLUMN_ORDER.forEach(function (c) { byCol[c] = []; });
     board.ideas.forEach(function (it) { if (matchesFilter(it)) byCol.ideas.push(it); });
-    board.changes.forEach(function (ch) { var s = ch.status || "draft"; (byCol[s] || (byCol[s] = [])).push(ch); });
+    board.changes.forEach(function (ch) {
+      var eff = effectiveChangeStatus(ch);
+      var col = eff === "in-progress" ? "in_progress" : eff;
+      (byCol[col] || (byCol[col] = [])).push(ch);
+    });
     // Filter changes in non-archived columns too
     COLUMN_ORDER.forEach(function (c) {
       if (c !== "ideas") byCol[c] = (byCol[c] || []).filter(matchesFilter);
@@ -424,7 +549,7 @@
       totalVisible === 0 && filter ? h("div", { className: "os-empty" }, "No cards match \"" + filterText + "\"") :
       h("div", { className: "os-cols" },
         visibleColumns.map(function (col) {
-          var items = sortBySequence(byCol[col] || []);
+          var items = sortItems(byCol[col] || []);
           return h("div", { key: col, className: "os-col" },
             h("div", { className: "os-col-head" },
               h("span", null, STATUS_LABEL[col] || col),
@@ -440,8 +565,12 @@
                     { on: it.hasSpecs, c: "#fbbf24", label: "specs" },
                   ];
                   var pct = it.taskStats && it.taskStats.total > 0 ? Math.round((it.taskStats.done / it.taskStats.total) * 100) : 0;
+                  var cg = groupCrewCardsByStatus(it.crewCards);
+                  var effCol = effectiveChangeStatus(it) === "in-progress" ? "in_progress" : effectiveChangeStatus(it);
+                  var radarCls = cg.activeState === "running" ? "os-card-live" : (cg.activeState === "review" ? "os-card-review" : "");
                   return h("button", {
-                    key: it.id || it.name, className: cn("os-card", STATUS_TONE[it.status] || ""), onClick: function () { onSelectItem(it); },
+                    key: it.id || it.name, "data-radar": cg.activeState === "running" || cg.activeState === "review" ? cg.activeState : undefined,
+                    className: cn("os-card", STATUS_TONE[effCol] || "", radarCls), onClick: function () { onSelectItem(it); },
                   },
                     h("div", { className: "os-card-title" },
                       it.sequence ? h("span", { className: "os-card-seq", title: "Sequence " + it.sequence.position + (it.sequence.dependsOn && it.sequence.dependsOn.length ? "; depends on " + it.sequence.dependsOn.join(", ") : "") }, "#" + it.sequence.position) : null,
@@ -454,6 +583,11 @@
                       it.taskStats ? h("span", { className: "os-card-progress" },
                         h("span", { className: "os-card-progress-track" }, h("span", { className: "os-card-progress-fill", style: { width: pct + "%" } })),
                         h("span", { className: "os-card-stats" }, it.taskStats.done + "/" + it.taskStats.total)
+                      ) : null,
+                      cg.total > 0 ? h("span", { className: "os-card-crew" },
+                        cg.running.length ? h("span", { className: "os-crew-pill-running" }, "\u25cf " + cg.running.length + " running") : null,
+                        cg.review.length ? h("span", { className: "os-crew-pill-review" }, "\u25d0 " + cg.review.length + " review") : null,
+                        !cg.running.length && !cg.review.length ? h("span", { className: "os-card-stats" }, "Crew " + cg.done.length + "/" + cg.total) : null
                       ) : null,
                       it.token ? h("button", {
                         className: "os-card-copy",
@@ -477,12 +611,25 @@
     var detail = _d[0], setDetail = _d[1], loading = _l[0], setLoading = _l[1], err = _e2[0], setErr = _e2[1];
     var isIdea = item.status === "ideas";
     useEffect(function () {
+      var alive = true;
       setLoading(true); setErr(""); setDetail(null);
-      var p = isIdea ? getIdea(source.id, item.name) : getChange(source.id, item.name);
-      p.then(function (d) { setDetail(d); setLoading(false); }).catch(function (e) { setErr(apiErr(e)); setLoading(false); });
+      function pull(first) {
+        var p = isIdea ? getIdea(source.id, item.name) : getChange(source.id, item.name);
+        p.then(function (d) { if (!alive) return; setDetail(d); if (first) setLoading(false); })
+         .catch(function (e) { if (!alive) return; if (first) { setErr(apiErr(e)); setLoading(false); } });
+      }
+      pull(true);
+      var timer = !isIdea && typeof setInterval === "function" ? setInterval(function () { pull(false); }, POLL_INTERVAL_MS) : null;
+      return function () { alive = false; if (timer && typeof clearInterval === "function") clearInterval(timer); };
     }, [source.id, item.name, isIdea]);
+    var stats = (detail && detail.taskStats) || item.taskStats;
+    var crew = groupCrewCardsByStatus((detail && detail.crewCards) || item.crewCards);
     return h(Modal, { title: item.title || item.name, onClose: onClose, wide: true },
-      h("div", { className: "os-detail-chip" }, h(CopyChip, { text: source.name + "/" + item.token })),
+      h("div", { className: "os-detail-chip" },
+        h(CopyChip, { text: source.name + "/" + item.token }),
+        stats ? h(Badge, { variant: "outline" }, "Checklist: " + stats.done + "/" + stats.total) : null,
+        crew.total > 0 ? h(Badge, { variant: "outline" }, "Crew: " + crew.done.length + "/" + crew.total + " done" + (crew.running.length ? " \u00b7 " + crew.running.length + " running" : "")) : null
+      ),
       loading ? h("p", { className: "os-empty" }, "Loading…") :
         err ? h("p", { className: "os-err" }, err) :
           isIdea ? h(Markdown, { md: detail && detail.content }) :
@@ -853,6 +1000,8 @@
     var _sel = useState(null), _bf = useState(""), _af = useState("");
     var _sm = useState("alpha");
     var _sdm = useState("semantic");
+    var _sw = useState(function () { return readPref("specsSidebarWidth", SPECS_SIDEBAR_MIN, SPECS_SIDEBAR_MAX, SPECS_SIDEBAR_DEFAULT); });
+    var sideW = _sw[0], setSideW = _sw[1];
     var mode = _m[0], setMode = _m[1], browser = _b2[0], setBrowser = _b2[1];
     var loading = _l2[0], setLoading = _l2[1], err = _e3[0], setErr = _e3[1];
     var selPath = _sel[0], setSelPath = _sel[1], before = _bf[0], setBefore = _bf[1], after = _af[0], setAfter = _af[1];
@@ -917,7 +1066,7 @@
         err ? h("p", { className: "os-err" }, err) :
           browser && browser.files && browser.files.length ? (function () {
             var sorted = sortFiles(browser.files, sortMode);
-            return h("div", { className: "os-specs-grid" },
+            return h("div", { className: "os-specs-grid", style: { gridTemplateColumns: sideW + "px 6px 1fr" } },
               h("div", { className: "os-specs-list" },
                 sorted.map(function (f) {
                   var summaryParts = [];
@@ -937,6 +1086,21 @@
                   );
                 })
               ),
+              h("div", {
+                role: "separator", "aria-orientation": "vertical", className: "os-specs-sash",
+                title: "Drag to resize (double-click to reset)",
+                onDoubleClick: function () { setSideW(SPECS_SIDEBAR_DEFAULT); writePref("specsSidebarWidth", SPECS_SIDEBAR_DEFAULT); },
+                onPointerDown: function (e) {
+                  e.preventDefault();
+                  var sx = e.clientX;
+                  function move(ev) { setSideW(clampVal(sideW + (ev.clientX - sx), SPECS_SIDEBAR_MIN, SPECS_SIDEBAR_MAX, SPECS_SIDEBAR_DEFAULT)); }
+                  function up(ev) {
+                    window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+                    writePref("specsSidebarWidth", clampVal(sideW + (ev.clientX - sx), SPECS_SIDEBAR_MIN, SPECS_SIDEBAR_MAX, SPECS_SIDEBAR_DEFAULT));
+                  }
+                  window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+                }
+              }),
               selFile ? h("div", { className: "os-specs-detail" },
                 h("div", { className: "os-specs-detail-head" },
                   h("span", { className: "os-specs-detail-path" }, selFile.path),
@@ -1045,7 +1209,12 @@
         setLoading(false);
       }).catch(function (e) { setErr(apiErr(e)); setLoading(false); });
     }
-    useEffect(function () { loadSources(); }, []);
+    useEffect(function () {
+      loadSources();
+      if (typeof setInterval !== "function") return;
+      var t = setInterval(function () { loadSources(true); }, POLL_INTERVAL_MS);
+      return function () { if (typeof clearInterval === "function") clearInterval(t); };
+    }, []);
 
     // Apply hash anchor on load + when sources change. Auto-select the
     // first source when no hash project is present so the user doesn't
