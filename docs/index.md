@@ -8,7 +8,7 @@ including delegating authoring and implementation to subagents.
 | Page | For | Covers |
 |---|---|---|
 | [Lifecycle](lifecycle.md) | Everyone | Change states, transitions, artifact readiness |
-| [Tool reference](tool-reference.md) | Two perspectives | Artifact → tool mapping (OpenSpec-native) and tool → filesystem effect (Hermes-native) |
+| [Tool reference](tool-reference.md) | Two perspectives | Artifact → tool mapping (OpenSpec-native), tool → filesystem effect (Hermes-native), and the `openspec_context` reference grammar for explorations and reviews |
 | [Delegation](delegation.md) | Orchestrators | Full workflow, subagent patterns, parallel delegation |
 
 ### Which page to start with

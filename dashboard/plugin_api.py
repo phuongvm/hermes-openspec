@@ -13,6 +13,7 @@ Routes
 - POST   /sources                              — register a source by path
 - DELETE /sources/{source_id}                  — unregister a source
 - PUT    /sources/{source_id}                  — update a source's path/name
+- POST   /sources/{source_id}/discover         — find child OpenSpec repos (preview or register)
 - GET    /sources/{source_id}/changes/{change} — change detail (proposal/tasks/design/specs)
 - GET    /sources/{source_id}/ideas/{idea}     — idea detail (markdown content)
 - GET    /sources/{source_id}/explorations/{n}?scope= — exploration detail (workspace | change:<name>)
@@ -29,17 +30,19 @@ session cookie set when you load the dashboard HTML).
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import importlib.util
 import os
 import re
+import sqlite3
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 # ---------------------------------------------------------------------------
 # Registry import — path-based, because the dashboard plugin loader imports
@@ -250,6 +253,102 @@ def _change_token(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Read-only Crew Kanban linkage
+# ---------------------------------------------------------------------------
+
+def _hermes_home() -> Path:
+    """The Hermes home that owns ``openspec.db`` (and the Crew ``kanban.db`` files)."""
+    if _registry is not None:
+        try:
+            return Path(_registry.db_path()).parent
+        except Exception:
+            pass
+    from hermes_constants import get_hermes_home
+
+    return Path(get_hermes_home())
+
+
+def _kanban_db_files(hermes_home: Path) -> list[tuple[str, Path]]:
+    found: list[tuple[str, Path]] = []
+    root_db = hermes_home / "kanban.db"
+    if root_db.is_file():
+        found.append(("default", root_db))
+    boards = hermes_home / "kanban" / "boards"
+    try:
+        for board in sorted(boards.iterdir()) if boards.is_dir() else []:
+            db = board / "kanban.db"
+            if board.is_dir() and db.is_file():
+                found.append((board.name, db))
+    except OSError:
+        pass
+    return found
+
+
+def _scan_crew_cards(hermes_home: Optional[Path] = None) -> list[dict[str, Any]]:
+    """Every non-archived Crew card from ``kanban.db`` files, opened strictly read-only.
+
+    Returns ``[]`` for missing, unreadable or schema-less databases; never writes.
+    """
+    home = Path(hermes_home) if hermes_home is not None else _hermes_home()
+    cards: list[dict[str, Any]] = []
+    for board, db_path in _kanban_db_files(home):
+        uri = db_path.resolve().as_uri() + "?mode=ro"
+        try:
+            with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as conn:
+                rows = conn.execute(
+                    "SELECT id, title, status, assignee, body FROM tasks WHERE status != 'archived'"
+                ).fetchall()
+        except (sqlite3.Error, OSError):
+            continue
+        for row_id, title, status, assignee, body in rows:
+            cards.append({
+                "id": str(row_id), "title": title or "", "status": status or "",
+                "assignee": assignee or "", "board": board, "body": body or "",
+            })
+    return cards
+
+
+class _CrewLinker:
+    """Matches Crew cards to OpenSpec artifacts by ``openspec/`` path or token only."""
+
+    def __init__(self, cards: Optional[list[dict[str, Any]]] = None):
+        self._entries = []
+        for card in cards or []:
+            refs = _artifacts.extract_openspec_refs(f"{card['title']}\n{card['body']}")
+            public = {
+                "id": card["id"], "title": card["title"], "status": card["status"],
+                "assignee": card["assignee"], "board": card["board"],
+                "url": f"/crew?card={card['id']}",
+            }
+            self._entries.append((public, refs))
+
+    def _collect(self, predicate) -> list[dict[str, Any]]:
+        seen: set[tuple[str, str]] = set()
+        out = []
+        for public, refs in self._entries:
+            key = (public["board"], public["id"])
+            if key not in seen and predicate(refs):
+                seen.add(key)
+                out.append(dict(public))
+        return out
+
+    def for_change(self, name: str, token: str) -> list[dict[str, Any]]:
+        return self._collect(lambda refs: name in refs["changes"] or token in refs["tokens"])
+
+    def for_exploration(self, scope: str, filename: str, token: str) -> list[dict[str, Any]]:
+        return self._collect(
+            lambda refs: (scope, filename) in refs["explorations"] or token in refs["tokens"]
+        )
+
+
+def _crew_linker() -> _CrewLinker:
+    try:
+        return _CrewLinker(_scan_crew_cards(_hermes_home()))
+    except Exception:
+        return _CrewLinker()
+
+
+# ---------------------------------------------------------------------------
 # Board scan
 # ---------------------------------------------------------------------------
 
@@ -296,7 +395,8 @@ def _idea_summary(path: Path, source_id: str) -> Optional[dict[str, Any]]:
     }
 
 
-def _scan(root: Path, source_id: str) -> Optional[dict[str, Any]]:
+def _scan(root: Path, source_id: str, crew: Optional[_CrewLinker] = None) -> Optional[dict[str, Any]]:
+    crew = crew or _CrewLinker()
     openspec_root = root / "openspec"
     if not openspec_root.is_dir():
         return None
@@ -354,6 +454,12 @@ def _scan(root: Path, source_id: str) -> Optional[dict[str, Any]]:
         d for d, _archived in _artifacts.iter_change_dirs(root)
     ]
     explorations = _artifacts.scan_explorations(root, change_dirs, _change_token)
+    for change in changes:
+        change["crewCards"] = crew.for_change(str(change["name"]), str(change["token"]))
+    for exploration in explorations:
+        exploration["crewCards"] = crew.for_exploration(
+            exploration["scope"], exploration["filename"], exploration["token"]
+        )
 
     if _registry is not None and hasattr(_registry, "ensure_change_sequence"):
         try:
@@ -387,7 +493,7 @@ def _scan(root: Path, source_id: str) -> Optional[dict[str, Any]]:
     }
 
 
-def _source_payload(source: dict[str, Any]) -> dict[str, Any]:
+def _source_payload(source: dict[str, Any], crew: Optional[_CrewLinker] = None) -> dict[str, Any]:
     root, error = _repo_root(source["path"])
     name = source.get("name") or (root.name if root else Path(source["path"]).expanduser().name)
     base = {
@@ -405,7 +511,7 @@ def _source_payload(source: dict[str, Any]) -> dict[str, Any]:
         **base,
         "valid": True,
         "repoRoot": str(root),
-        "openspec": _scan(root, str(base["id"])),
+        "openspec": _scan(root, str(base["id"]), crew),
         "error": None,
     }
 
@@ -441,7 +547,8 @@ def _find_change_dir(root: Path, change_name: str) -> tuple[Path | None, bool]:
     return None, False
 
 
-def _change_detail(root: Path, change_name: str) -> Optional[dict[str, Any]]:
+def _change_detail(root: Path, change_name: str, crew: Optional[_CrewLinker] = None) -> Optional[dict[str, Any]]:
+    crew = crew or _CrewLinker()
     change_dir, archived = _find_change_dir(root, change_name)
     if change_dir is None:
         return None
@@ -487,6 +594,7 @@ def _change_detail(root: Path, change_name: str) -> Optional[dict[str, Any]]:
         "explorations": explorations,
         "hasExplorations": bool(explorations),
         "reviews": reviews,
+        "crewCards": crew.for_change(change_dir.name, _change_token(change_dir.name)),
     }
 
 
@@ -845,7 +953,8 @@ def _registered_sources() -> list[dict[str, Any]]:
 
 @router.get("/sources")
 def list_sources():
-    return {"sources": [_source_payload(s) for s in _registered_sources()]}
+    crew = _crew_linker()  # one read-only pass over the kanban databases per request
+    return {"sources": [_source_payload(s, crew) for s in _registered_sources()]}
 
 
 @router.post("/sources")
@@ -925,10 +1034,94 @@ def init_source(source_id: str):
     return {"ok": True, "message": "OpenSpec initialized", "source": _source_payload(source)}
 
 
+class _SourceDiscover(BaseModel):
+    # Wire name is ``register``; the attribute is renamed because ``BaseModel.register`` is taken.
+    model_config = ConfigDict(populate_by_name=True)
+    do_register: bool = Field(default=False, alias="register")
+
+
+_GITMODULES_PATH_RE = re.compile(r"^\s*path\s*=\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _is_container(path: Path) -> bool:
+    """A depth-1 grouping directory: neither a git repository nor an OpenSpec repository."""
+    return (
+        path.is_dir()
+        and not path.name.startswith(".")
+        and path.name != "openspec"
+        and not (path / ".git").exists()
+        and not (path / "openspec").is_dir()
+    )
+
+
+def _child_dirs(path: Path) -> list[Path]:
+    try:
+        return sorted(
+            (c for c in path.iterdir() if c.is_dir() and not c.name.startswith(".")),
+            key=lambda c: c.name.lower(),
+        )
+    except OSError:
+        return []
+
+
+def _discover_candidates(root: Path) -> list[Path]:
+    """Bounded candidate set: ``.gitmodules`` paths, depth-1 children, depth-2 children of containers."""
+    root_resolved = root.resolve()
+    raw: list[Path] = []
+    try:
+        modules = (root / ".gitmodules").read_text(encoding="utf-8", errors="replace")
+        raw.extend(root / m.group(1).strip().strip('"') for m in _GITMODULES_PATH_RE.finditer(modules))
+    except OSError:
+        pass
+    for child in _child_dirs(root):
+        raw.append(child)
+        if _is_container(child):
+            raw.extend(_child_dirs(child))
+
+    found: dict[Path, Path] = {}
+    for cand in raw:
+        try:
+            resolved = cand.resolve()
+            if resolved == root_resolved or root_resolved not in resolved.parents:
+                continue
+            if (cand / "openspec").is_dir():
+                found.setdefault(resolved, cand)
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return [found[key] for key in sorted(found, key=lambda p: str(p).lower())]
+
+
+@router.post("/sources/{source_id}/discover")
+def discover_sources(source_id: str, body: Optional[_SourceDiscover] = None):
+    _source, root = _resolve_source(source_id)
+    register = bool(body.do_register) if body is not None else False
+
+    def norm(raw: str) -> Path:
+        return Path(raw).expanduser().resolve()
+
+    known = {norm(s["path"]) for s in _registry.list_sources()}
+    candidates = []
+    registered = []
+    for cand in _discover_candidates(root):
+        already = cand.resolve() in known
+        candidates.append({"path": str(cand), "name": cand.name, "alreadyRegistered": already})
+        if register and not already:
+            try:
+                added = _registry.add_source(path=str(cand), name=cand.name)
+            except ValueError:
+                continue  # raced with another registration: treat as already registered
+            known.add(cand.resolve())
+            registered.append({
+                "id": added["id"], "token": added["token"], "name": added["name"] or cand.name,
+                "path": added["path"],
+            })
+    return {"ok": True, "candidates": candidates, "registered": registered}
+
+
 @router.get("/sources/{source_id}/changes/{change_name}")
 def change_detail(source_id: str, change_name: str):
     _source, root = _resolve_source(source_id)
-    detail = _change_detail(root, change_name)
+    detail = _change_detail(root, change_name, _crew_linker())
     if detail is None:
         raise HTTPException(status_code=404, detail="Change not found")
     return detail
@@ -952,6 +1145,7 @@ def exploration_detail(source_id: str, exploration_name: str, scope: str = "work
         raise HTTPException(status_code=400, detail="Invalid exploration name or scope")
     if detail is None:
         raise HTTPException(status_code=404, detail="Exploration not found")
+    detail["crewCards"] = _crew_linker().for_exploration(detail["scope"], detail["filename"], detail["token"])
     return detail
 
 

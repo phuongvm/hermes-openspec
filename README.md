@@ -35,6 +35,10 @@ For the full tool reference, lifecycle states, and delegation patterns, see [doc
 - Register repos by path — each gets a vanity name and stable tokens (`name/os_a1b2c3`).
 - **Changes view** — Kanban-style board: ideas → draft → todo → in_progress → done → archived. Click any change to read its proposal, tasks, design, and spec deltas. Spec deltas render side-by-side (current vs proposed) with structured requirement/scenario parsing.
 - **Specs view** — browse current specs in the worktree, sorted alphabetically or by last git commit date. Compare against HEAD (dirty mode) or arbitrary git refs (before/after).
+- **Explorations view** — lists `openspec/workspace/explorations/*.md` and each change's `explorations/*.md`, with scope, date and a copyable `<source>/<token>` reference.
+- **Change reviews** — a change's `reviews/*.md` appear in a Reviews tab with the extracted verdict (`APPROVED` / `REJECTED` / `PENDING`) and round.
+- **Crew card links** — a change or exploration shows the Crew Kanban cards whose title or body names it by `openspec/...` path or token (read-only; links go to `/crew?card=<id>`).
+- **Discover** — one click lists, and optionally registers, child repositories that have an `openspec/` folder (`.gitmodules` paths, direct children, and children of plain grouping folders such as `oss/` or `ai_agents/`).
 - **Source initialization** — register a repo before it has an `openspec/` directory, then initialize it from the dashboard. CLI-backed and fallback initialization both normalize the plugin-supported layout: `openspec/changes/`, `openspec/changes/archive/`, `openspec/specs/`, and `openspec/ideas/`.
 - Deep-linking via URL hash (`#project-name/token#anchor` — the second `#` selects a tab: proposal, tasks, design, or specs).
 
@@ -126,7 +130,9 @@ This pulls the latest from the remote and reloads. If the backend API routes cha
 ```
 hermes-openspec/
 ├── plugin.yaml              # Tool plugin manifest — declares agent tools
-├── __init__.py              # Plugin registration — wires tools, sets check_fn gating
+├── __init__.py              # Plugin registration — wires tools, bundled-skill dedup, check_fn gating
+├── cli_resolver.py          # Shared openspec binary ladder (stdlib only)
+├── artifacts_index.py       # Explorations/reviews scan, reference grammar, Crew ref extraction (stdlib only)
 ├── schemas.py               # Tool parameter schemas (JSON Schema for each tool)
 ├── tools.py                 # Tool handlers — wraps OpenSpec CLI and filesystem-backed idea workflows
 ├── registry.py              # SQLite registry of sources at <hermes_home>/openspec.db
@@ -143,6 +149,8 @@ hermes-openspec/
 | `plugin.yaml` | Which tools the plugin provides |
 | `tools.py` | Tool handlers for CLI-backed commands and filesystem-backed idea workflows |
 | `registry.py` | Source registry schema, token derivation, DB path |
+| `cli_resolver.py` | Windows-safe `openspec` binary resolution shared by tools and dashboard |
+| `artifacts_index.py` | Single owner of exploration/review scanning, verdicts, reference resolution |
 | `dashboard/plugin_api.py` | All backend API routes and the spec-browser logic |
 | `dashboard/manifest.json` | Tab registration, entry points |
 | `dashboard/dist/index.js` | Frontend: board, specs view, source dialogs, deep-linking |
@@ -166,22 +174,25 @@ Plugins are disabled by default (`defaultEnabled: false`). Enable via the Deskto
 
 ### What it shows
 
-- **Source selector** with project counts (changes, ideas, specs)
+- **Source selector** with project counts (changes, ideas, specs, explorations) and a **Discover** control for child OpenSpec repositories
 - **Source management** — add, edit, and remove registry entries (remove requires explicit confirmation), refresh, and initialize a registered repository that is missing the standard `openspec/` layout
 - **Work view** — Ideas, Draft, Todo, In Progress, Done, Archived columns with filter and archived toggle
-- **Change detail** — Proposal, Tasks, Design, Specs tabs with task progress
+- **Change detail** — Proposal, Tasks, Design, Specs, Reviews and Explorations tabs with task progress, plus Crew card chips that open `/crew?card=<id>`
+- **Explorations view** — workspace and change-local explorations with search, scope badge, copyable reference and rendered markdown
+- **Dockable tile** — the sidebar entry registers `asTile: true`, so the OpenSpec route can be docked as a tile
 - **Idea detail** — readable markdown content
 - **Specs browser** — current spec list, selected content, worktree diffs (semantic, side-by-side, raw)
 
 ### Agent context resolution
 
 The `openspec_context` tool resolves registered source references to changes,
-specs, and ideas, including archived changes, and rejects ambiguous tokens
-instead of guessing.
+specs, ideas, explorations and change reviews (by token, `kind:name` form, or a unique plain name),
+including archived changes, and rejects ambiguous or malformed references
+instead of guessing. See [docs/tool-reference.md](docs/tool-reference.md#openspec_context-references-explorations-and-reviews).
 
 ### Read-only scope
 
-OpenSpec artifacts — changes, proposals, designs, specs, ideas, tasks, and documents — are read-only in the Desktop surface: no task completion, artifact editing, or file writes are exposed, and the plugin never accesses repository files or paths client-side. The one managed surface is the source registry, mirroring the dashboard: add, edit, remove (registry entry only, after explicit confirmation — repository files are never deleted), refresh, and standard OpenSpec initialization for a registered repository missing the `openspec/` layout. These controls use only the existing dashboard source endpoints (`POST /sources`, `PUT /sources/{source_id}`, `DELETE /sources/{source_id}`, `POST /sources/{source_id}/init`); initialization may create the standard `openspec/` layout when missing and preserves existing artifacts.
+OpenSpec artifacts — changes, proposals, designs, specs, ideas, tasks, and documents — are read-only in the Desktop surface: no task completion, artifact editing, or file writes are exposed, and the plugin never accesses repository files or paths client-side. The one managed surface is the source registry, mirroring the dashboard: add, edit, remove (registry entry only, after explicit confirmation — repository files are never deleted), refresh, and standard OpenSpec initialization for a registered repository missing the `openspec/` layout. These controls use only the dashboard source endpoints (`POST /sources`, `PUT /sources/{source_id}`, `DELETE /sources/{source_id}`, `POST /sources/{source_id}/init`, and `POST /sources/{source_id}/discover`, which only previews or registers new sources); initialization may create the standard `openspec/` layout when missing and preserves existing artifacts.
 
 ### Remote backend behavior
 
@@ -194,10 +205,10 @@ Before any separately approved deployment, capture the currently installed `plug
 ### Tests
 
 ```bash
-node tests/desktop-plugin-smoke.mjs          # 681 tests: contract, helpers, source registry, UI verification
+node tests/desktop-plugin-smoke.mjs          # 776 tests: contract, helpers, source registry, UI verification, Slice 2 surface
 node tests/lane-override-behavior.mjs        # 23 tests: lane override/source/phase behavior
 node spikes/001-desktop-route-api/smoke.mjs # 36 tests: legacy seam validation
-PYTHONPATH=<hermes-agent repo> python3 -m pytest -q tests/ # 64 passed, 2 skipped
+PYTHONPATH=<hermes-agent repo> python3 -m pytest -q tests/ # 214 passed
 ```
 
 ### Runtime constraints
