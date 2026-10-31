@@ -190,3 +190,74 @@ def test_spec_detail_endpoint_exposes_metadata(mono):
     assert body["requirementCount"] == 2 and body["scenarioCount"] == 3
     listing = client.get(f"/sources/{child['id']}/spec-browser").json()["files"]
     assert {f["path"]: f["scenarioCount"] for f in listing}["compose/spec.md"] == 3
+
+
+# ── Statusbar chip: nearest-ancestor session resolver + GET /sources?cwd= ───
+
+
+def test_nearest_openspec_root_walks_to_nearest_ancestor(mono):
+    root, sub = mono["root"], mono["root"] / "docker-compose"
+    deep = sub / "src" / "deeper"
+    deep.mkdir(parents=True)
+    assert plugin_api._nearest_openspec_root(str(deep)) == sub.resolve()
+    assert plugin_api._nearest_openspec_root(str(sub)) == sub.resolve()
+    assert plugin_api._nearest_openspec_root(str(sub / "openspec" / "changes")) == sub.resolve()
+    assert plugin_api._nearest_openspec_root(str(root)) == root.resolve()
+
+
+def test_nearest_openspec_root_none_without_openspec_or_empty(tmp_path):
+    bare = tmp_path / "bare" / "child"
+    bare.mkdir(parents=True)
+    assert plugin_api._nearest_openspec_root(str(bare)) is None
+    assert plugin_api._nearest_openspec_root("") is None
+    assert plugin_api._nearest_openspec_root("   ") is None
+
+
+def test_sources_without_cwd_keeps_legacy_shape(mono):
+    client = mono["client"]
+    client.post("/sources", json={"path": str(mono["root"]), "name": "parent"})
+    for url in ("/sources", "/sources?cwd="):
+        body = client.get(url).json()
+        assert "sources" in body and len(body["sources"]) == 1
+        assert "sessionSource" not in body
+
+
+def test_sources_cwd_registered_returns_registered_payload(mono):
+    client = mono["client"]
+    parent = client.post("/sources", json={"path": str(mono["root"]), "name": "parent"}).json()["source"]
+    body = client.get("/sources", params={"cwd": str(mono["root"] / "uninitialized-sub")}).json()
+    assert body["sessionSource"]["id"] == parent["id"]
+    assert body["sessionSource"].get("unregistered") is not True
+    assert body["sessionSource"]["valid"] is True
+    assert [c["name"] for c in body["sessionSource"]["openspec"]["changes"]] == ["root-change"]
+
+
+def test_sources_cwd_unregistered_returns_cwd_id_flag(mono):
+    client = mono["client"]
+    sub = mono["root"] / "docker-compose"
+    body = client.get("/sources", params={"cwd": str(sub / "openspec" / "changes")}).json()
+    ss = body["sessionSource"]
+    assert ss["unregistered"] is True
+    assert ss["id"] == "cwd:" + sub.resolve().as_posix()
+    assert ss["path"] == str(sub.resolve())
+    assert ss["valid"] is True
+    assert [c["name"] for c in ss["openspec"]["changes"]] == ["compose-change"]
+    assert body["sources"] == []  # resolution never registers anything
+
+
+def test_sources_cwd_nested_subproject_nearest_ancestor_wins(mono):
+    client = mono["client"]
+    client.post("/sources", json={"path": str(mono["root"]), "name": "parent"})
+    sub = mono["root"] / "docker-compose"
+    body = client.get("/sources", params={"cwd": str(sub / "nested")}).json()
+    ss = body["sessionSource"]
+    assert ss["unregistered"] is True and ss["id"] == "cwd:" + sub.resolve().as_posix()
+    assert [c["name"] for c in ss["openspec"]["changes"]] == ["compose-change"]
+
+
+def test_sources_cwd_without_openspec_is_null(mono, tmp_path):
+    client = mono["client"]
+    bare = tmp_path / "plain"
+    bare.mkdir()
+    assert client.get("/sources", params={"cwd": str(bare)}).json()["sessionSource"] is None
+    assert client.get("/sources", params={"cwd": "   "}).json().get("sessionSource", "absent") == "absent"

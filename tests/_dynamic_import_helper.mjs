@@ -23,7 +23,7 @@ const sdkExports = [
 const sdkShim = sdkExports
   + ';export const host={navigate(u){if(globalThis.__sdkNav)globalThis.__sdkNav.push(u)}}'
   + ';export const ROUTES_AREA="routes"'
-  + ';export const SIDEBAR_NAV_AREA="sidebar.nav"'
+  + ';export const SIDEBAR_NAV_AREA="sidebar.nav";export const STATUSBAR_AREAS={right:"statusBar.right"}'
   + ';export default {}'
 
 // Shim react

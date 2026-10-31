@@ -142,7 +142,7 @@ const sdkShim = sdkExports
   + ';' + cnShim
   + ';export const host={navigate(u){if(globalThis.__sdkNav)globalThis.__sdkNav.push(u)}}'
   + ';export const ROUTES_AREA="routes"'
-  + ';export const SIDEBAR_NAV_AREA="sidebar.nav"'
+  + ';export const SIDEBAR_NAV_AREA="sidebar.nav";export const STATUSBAR_AREAS={right:"statusBar.right"}'
   + ';export default {}'
 const reactShim = 'export function useState(v){return[v,function(){},function(){},v]};'
   + 'export function useEffect(f,d){return undefined};'
@@ -584,7 +584,7 @@ const sdkShim2 = [
   + ';export const useQuery=(o)=>globalThis.__openspecQuery'
   + ';export const host={navigate(u){if(globalThis.__sdkNav)globalThis.__sdkNav.push(u)}}'
   + ';export const ROUTES_AREA="routes"'
-  + ';export const SIDEBAR_NAV_AREA="sidebar.nav"'
+  + ';export const SIDEBAR_NAV_AREA="sidebar.nav";export const STATUSBAR_AREAS={right:"statusBar.right"}'
   + ';export default {}'
 const reactShim2 = 'export function useState(v){const i=globalThis.__openspecHooks.hookIdx++;if(globalThis.__openspecHooks.stateReg[i]===undefined)globalThis.__openspecHooks.stateReg[i]={v:v};const box=globalThis.__openspecHooks.stateReg[i];const set=function(nv){box.v=typeof nv==="function"?nv(box.v):nv};return[box.v,set]};'
   + 'export function useEffect(f,d){globalThis.__openspecHooks.effects.push({f:f,d:d});return undefined};'
@@ -2462,6 +2462,54 @@ check(!s2.__driverError, 'Slice 2 driver executes', s2.__driverError)
   for (const n of ['explorationPath', 'discoverSourcesPath', 'ExplorationsView', 'ExplorationDetailDrawer', 'ReviewsView', 'CrewCardChips', 'DiscoverControl']) {
     check(ex[n] === 'function', '__test exports ' + n, ex[n])
   }
+}
+
+console.log('\n[Slice 1] Status bar chip — pure helpers, registration, click flow')
+{
+  const c = s2.chip || {}
+  check(c.contrib && c.contrib.area === 'statusBar.right' && c.contrib.order === 120 && c.contrib.id === 'chip',
+    "registers id 'chip' in STATUSBAR_AREAS.right at order 120", JSON.stringify(c.contrib))
+  check(c.contribRenders === true, 'chip contribution render() executes', JSON.stringify(c.contribRenders))
+  check(c.hiddenEmpty === true, 'chip renders null for empty cwd', JSON.stringify(c.hiddenEmpty))
+  check(c.hiddenNoOpenspec === true, 'chip renders null for cwd without openspec/ ancestor', JSON.stringify(c.hiddenNoOpenspec))
+  check(c.liveCount === '3', 'undone count = in-progress + todo + draft (excludes done/archived/ideas)', JSON.stringify(c.liveCount))
+  check(c.liveIcon === 'list-tree', 'chip uses the list-tree Codicon', JSON.stringify(c.liveIcon))
+  check(/\bos-status-chip\b/.test(c.liveClass || '') && /\bos-chip-live\b/.test(c.liveClass || '') && c.liveRadar === 'running',
+    'running Crew ticket -> os-chip-live + data-radar=running', JSON.stringify([c.liveClass, c.liveRadar]))
+  check(c.idleCount === '2' && !/os-chip-live/.test(c.idleClass || '') && c.idleRadar === undefined,
+    'no running Crew ticket -> no radar class or attribute', JSON.stringify([c.idleCount, c.idleClass, c.idleRadar]))
+  check(c.reducedMotion && c.reducedMotion.hasRule && c.reducedMotion.disablesAnimation && c.reducedMotion.coversLive,
+    'prefers-reduced-motion: reduce disables the live radar animation', JSON.stringify(c.reducedMotion))
+  check(JSON.stringify(c.registeredClick) === JSON.stringify(['selectSource:src-chip', 'navigate:/openspec']),
+    'registered click: selectSource then navigate(/openspec)', JSON.stringify(c.registeredClick))
+  check(JSON.stringify(c.unregisteredClick) === JSON.stringify(['after-sync-click', 'addSource:/repos/chipapp', 'selectSource:src-new-1', 'navigate:/openspec']) ||
+    JSON.stringify(c.unregisteredClick) === JSON.stringify(['addSource:/repos/chipapp', 'after-sync-click', 'selectSource:src-new-1', 'navigate:/openspec']),
+    'unregistered click: addSource -> selectSource(returned id) -> navigate(/openspec)', JSON.stringify(c.unregisteredClick))
+  check(c.unregisteredReturnsPromise === true, 'unregistered click awaits registration', JSON.stringify(c.unregisteredReturnsPromise))
+  check(c.store && c.store.hasSubscribe === 'function' && c.store.hasSelect === 'function' &&
+    JSON.stringify(c.store.heard) === JSON.stringify(['s9']) && c.store.selected === 's10' && c.store.listeners === 0,
+    'createSessionStore subscribe/selectSource notifies and unsubscribes', JSON.stringify(c.store))
+}
+{
+  const P = s2.chipPure || {}
+  check(P.pathNone === '/sources' && P.pathEmpty === '/sources' && P.pathBlank === '/sources',
+    'sourcesPath() without cwd keeps the legacy path', JSON.stringify([P.pathNone, P.pathEmpty, P.pathBlank]))
+  check(P.pathCwd === '/sources?cwd=C%3A%5Ca%20b%5Cx%26y', 'sourcesPath(cwd) url-encodes cwd', P.pathCwd)
+  check(P.normWin === 'c:/Users/Me/Proj', 'normalizeFsPath: forward slashes, lowercase drive, no trailing slash', P.normWin)
+  check(P.normSlashes === '/a/b/c' && P.normRoot === '/' && P.normEmpty === '' && P.normNull === '',
+    'normalizeFsPath: collapses separators, keeps root, tolerates empty', JSON.stringify([P.normSlashes, P.normRoot, P.normEmpty, P.normNull]))
+  check(P.resEmpty === null, 'resolve: empty cwd -> null', JSON.stringify(P.resEmpty))
+  check(P.resLongest === 'c', 'resolve fallback: longest ancestor wins', JSON.stringify(P.resLongest))
+  check(P.resBoundary === 'p', 'resolve fallback: path boundary respected (sub != subway)', JSON.stringify(P.resBoundary))
+  check(P.resNone === null, 'resolve fallback: no ancestor -> null', JSON.stringify(P.resNone))
+  check(P.resBackendNull === null, 'resolve: backend null sessionSource -> null', JSON.stringify(P.resBackendNull))
+  check(P.resBackendWins === true, 'resolve: backend sessionSource wins')
+  check(P.resWindows === 'w', 'resolve fallback: windows drive/backslash normalisation', JSON.stringify(P.resWindows))
+  const sum = P.sum || {}
+  check(sum.visible && sum.undoneCount === 3 && sum.runningChangesCount === 1 && sum.runningTicketsCount === 2 && sum.radar === true && sum.sourceId === 's' && sum.unregistered === false,
+    'summarizeOpenSpecChip counts undone + running', JSON.stringify(sum))
+  check(P.sumNull === false && P.sumInvalid === false, 'summarizeOpenSpecChip hides for null/invalid source')
+  check(JSON.stringify(P.sumUnreg) === JSON.stringify([true, false]), 'summarizeOpenSpecChip carries unregistered flag, radar off with no tickets', JSON.stringify(P.sumUnreg))
 }
 
 console.log('  Path builders')

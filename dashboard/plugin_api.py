@@ -172,6 +172,31 @@ def _repo_root(raw_path: str) -> tuple[Path | None, str | None]:
     return directory, None
 
 
+def _nearest_openspec_root(raw_path: str) -> Optional[Path]:
+    """Nearest ancestor (or self) directory that owns an ``openspec/`` directory.
+
+    Used to resolve a chat session's cwd to its OpenSpec project: a nested
+    subproject with its own ``openspec/`` wins over any parent monorepo. Returns
+    ``None`` for empty/invalid input or when no ancestor owns ``openspec/``.
+    """
+    if not str(raw_path or "").strip():
+        return None
+    try:
+        target = _resolve_path(raw_path)
+    except HTTPException:
+        return None
+    try:
+        directory = target if target.is_dir() else target.parent
+        for curr in [directory, *directory.parents]:
+            if curr.name == "openspec" and curr.is_dir():
+                return curr.parent
+            if (curr / "openspec").is_dir():
+                return curr
+    except OSError:
+        return None
+    return None
+
+
 def _source_root(raw_path: str) -> tuple[Path | None, str | None]:
     """Resolve a raw path to a repo root containing ``openspec/``.
 
@@ -1035,10 +1060,32 @@ def _registered_sources() -> list[dict[str, Any]]:
 # Routes
 # ---------------------------------------------------------------------------
 
+def _session_source(cwd: str, registered: list[dict[str, Any]], crew: _CrewLinker) -> Optional[dict[str, Any]]:
+    """Resolve a session cwd to its OpenSpec source payload (registered or ad-hoc)."""
+    nearest = _nearest_openspec_root(cwd)
+    if nearest is None:
+        return None
+    for source in registered:
+        root, _error = _repo_root(source["path"])
+        if root is not None and root == nearest:
+            return _source_payload(source, crew)
+    ad_hoc = {
+        "id": f"cwd:{nearest.as_posix()}",
+        "token": _change_token(str(nearest)),
+        "name": nearest.name,
+        "path": str(nearest),
+    }
+    return {**_source_payload(ad_hoc, crew), "unregistered": True}
+
+
 @router.get("/sources")
-def list_sources():
+def list_sources(cwd: Optional[str] = None):
     crew = _crew_linker()  # one read-only pass over the kanban databases per request
-    return {"sources": [_source_payload(s, crew) for s in _registered_sources()]}
+    registered = _registered_sources()
+    body: dict[str, Any] = {"sources": [_source_payload(s, crew) for s in registered]}
+    if cwd is not None and cwd.strip():
+        body["sessionSource"] = _session_source(cwd, registered, crew)
+    return body
 
 
 @router.post("/sources")

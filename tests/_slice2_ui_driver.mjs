@@ -24,7 +24,7 @@ const sdkShim = names.map(n => 'export const ' + n + '=(...a)=>a').join(';')
   + ';export function cn(...a){ return a.filter(Boolean).join(" ") }'
   + ';export const host={navigate(u){if(globalThis.__sdkNav)globalThis.__sdkNav.push(u)}}'
   + ';export const ROUTES_AREA="routes"'
-  + ';export const SIDEBAR_NAV_AREA="sidebar.nav"'
+  + ';export const SIDEBAR_NAV_AREA="sidebar.nav";export const STATUSBAR_AREAS={right:"statusBar.right"}'
   + ';export default {}'
 const reactShim = 'export function useState(v){return[v,function(){}]};'
   + 'export function useEffect(f,d){if(globalThis.__effects)globalThis.__effects.push(f);return undefined};'
@@ -629,5 +629,113 @@ R.slice3c = safe(() => {
     filterInput: !!filterInput,
   }
 })
+
+// ── Status bar chip (Slice 1: session-folder OpenSpec chip) ────────────────
+globalThis.__effects = globalThis.__effects || []
+{
+  const chipSrc = (changes, extra) => Object.assign({
+    id: 'src-chip', name: 'chipapp', valid: true, path: '/repos/chipapp', repoRoot: '/repos/chipapp',
+    openspec: { changes },
+  }, extra || {})
+  const CH = (name, status, crew) => ({ name, token: 'os_' + name, title: name, status, crewCards: crew || [] })
+  const running = [{ id: 't_run001', title: 'r', status: 'running' }]
+  const mixed = [
+    CH('a', 'in-progress', running), CH('b', 'todo'), CH('c', 'draft'),
+    CH('d', 'done'), CH('e', 'archived'),
+    { name: 'i1', token: 'os_i1', title: 'i1', status: 'ideas' }, { name: 'i2', token: 'os_i2', title: 'i2', status: 'ideas' },
+  ]
+  const cwdAtom = (v) => ({ get: () => v, subscribe: () => () => {} })
+  const mkCtx = (cwd, log) => ({ host: { state: { cwd: cwdAtom(cwd) }, navigate: (u) => log && log.push('navigate:' + u) } })
+  const render = (cwd, fixture, extra) => {
+    globalThis.__fixtures['session-source'] = fixture === undefined ? undefined : { data: fixture }
+    const log = (extra && extra.log) || []
+    const api = (extra && extra.api) || { sources: () => Promise.resolve({}), addSource: () => Promise.resolve({}) }
+    const store = (extra && extra.store) || { selectSource: (id) => log.push('selectSource:' + id) }
+    return { log, node: t.OpenSpecStatusChip({ api, sessionStore: store, ctx: mkCtx(cwd, log) }) }
+  }
+  const reg = []
+  plugin.register({ registerMany(arr) { arr.forEach(c => reg.push(c)) }, rest() { return Promise.resolve({}) } })
+  const chipContrib = reg.find(c => c.id === 'chip')
+  const chipRender = chipContrib ? safe(() => chipContrib.render()) : null
+
+  const hiddenEmpty = render('', { sources: [], sessionSource: null }).node
+  const hiddenNoOs = render('/tmp/plain', { sources: [], sessionSource: null }).node
+  const live = render('/repos/chipapp', { sources: [], sessionSource: chipSrc(mixed) })
+  const idle = render('/repos/chipapp', { sources: [], sessionSource: chipSrc([CH('a', 'in-progress', [{ id: 't1', status: 'review' }]), CH('b', 'todo')]) })
+  const countOf = (node) => { const b = find(node, n => n.component === 'b')[0]; return b ? texts(b) : null }
+  const iconOf = (node) => { const i = find(node, n => n.component === sdk.Codicon)[0]; return i ? i.props.name : null }
+  const cssOf = (node) => { const st = find(node, n => n.component === 'style')[0]; return st ? st.props.children : '' }
+  const btn = (node) => node && node.component === 'button' ? node : null
+  const cssText = cssOf(live.node) || t.CHIP_CSS || ''
+  const rm = cssText.match(/@media \(prefers-reduced-motion: reduce\)\s*\{([^]*)\}\s*$/)
+
+  // registered click -> selectSource then navigate
+  const regLog = []
+  const regSrc = chipSrc(mixed)
+  const regChip = render('/repos/chipapp', { sources: [regSrc], sessionSource: regSrc }, { log: regLog })
+  btn(regChip.node) && btn(regChip.node).props.onClick()
+
+  // unregistered click -> addSource, selectSource, navigate (strict order)
+  const unLog = []
+  const unSrc = chipSrc(mixed, { id: 'cwd:/repos/chipapp', unregistered: true })
+  const unApi = { sources: () => Promise.resolve({}), addSource: (p, n) => { unLog.push('addSource:' + p); return Promise.resolve({ ok: true, source: { id: 'src-new-1' } }) } }
+  const unChip = render('/repos/chipapp', { sources: [], sessionSource: unSrc }, { log: unLog, api: unApi })
+  const pendingClick = btn(unChip.node) && btn(unChip.node).props.onClick()
+  unLog.push('after-sync-click')
+  await new Promise(r => setTimeout(r, 20))
+
+  // session store subscribe/selectSource
+  const store = t.createSessionStore()
+  const heard = []
+  const off = store.subscribe((id) => heard.push(id))
+  store.selectSource('s9')
+  off()
+  store.selectSource('s10')
+
+
+  const T = t
+  const srcs = [{ id: 'p', valid: true, path: '/mono', repoRoot: '/mono' }, { id: 'c', valid: true, path: '/mono/sub', repoRoot: '/mono/sub' }, { id: 'x', valid: true, path: '/mono/sub-other', repoRoot: '/mono/sub-other' }]
+  const ssx = { id: 'cwd:/z', unregistered: true, valid: true }
+  const winSrc = [{ id: 'w', valid: true, path: 'C:\\Work\\Proj', repoRoot: 'C:\\Work\\Proj' }]
+  const idOf = (x) => x === null ? null : (x && x.id)
+  const sumv = T.summarizeOpenSpecChip({ id: 's', name: 'n', path: '/p', valid: true, openspec: { changes: [
+    { name: 'a', status: 'in-progress', crewCards: [{ status: 'running' }, { status: 'running' }] }, { name: 'b', status: 'todo' },
+    { name: 'c', status: 'draft' }, { name: 'd', status: 'done' }, { name: 'e', status: 'archived' }, { name: 'f', status: 'ideas' } ] } })
+  const uns = T.summarizeOpenSpecChip({ id: 'u', unregistered: true, valid: true, openspec: { changes: [] } })
+  R.chipPure = {
+    pathNone: T.sourcesPath(), pathEmpty: T.sourcesPath(''), pathBlank: T.sourcesPath('   '),
+    pathCwd: T.sourcesPath('C:\\a b\\x&y'),
+    normWin: T.normalizeFsPath('C:\\Users\\Me\\Proj\\'), normSlashes: T.normalizeFsPath('/a//b/c/'),
+    normRoot: T.normalizeFsPath('/'), normEmpty: T.normalizeFsPath(''), normNull: T.normalizeFsPath(null),
+    resEmpty: idOf(T.resolveSessionOpenSpecSource(srcs, '', undefined)),
+    resLongest: idOf(T.resolveSessionOpenSpecSource(srcs, '/mono/sub/deep', undefined)),
+    resBoundary: idOf(T.resolveSessionOpenSpecSource(srcs, '/mono/subway', undefined)),
+    resNone: idOf(T.resolveSessionOpenSpecSource(srcs, '/other', undefined)),
+    resBackendNull: idOf(T.resolveSessionOpenSpecSource(srcs, '/mono/sub', null)),
+    resBackendWins: T.resolveSessionOpenSpecSource(srcs, '/z', ssx) === ssx,
+    resWindows: idOf(T.resolveSessionOpenSpecSource(winSrc, 'c:/Work/Proj/x', undefined)),
+    sum: sumv, sumNull: T.summarizeOpenSpecChip(null).visible, sumInvalid: T.summarizeOpenSpecChip({ valid: false }).visible,
+    sumUnreg: [uns.unregistered, uns.radar],
+  }
+
+  R.chip = {
+    contrib: chipContrib ? { area: chipContrib.area, order: chipContrib.order, id: chipContrib.id } : null,
+    contribRenders: !!chipRender && !chipRender.__error,
+    hiddenEmpty: hiddenEmpty === null || hiddenEmpty === undefined,
+    hiddenNoOpenspec: hiddenNoOs === null || hiddenNoOs === undefined,
+    liveClass: btn(live.node) && btn(live.node).props.className,
+    liveRadar: btn(live.node) && btn(live.node).props['data-radar'],
+    liveCount: countOf(live.node),
+    liveIcon: iconOf(live.node),
+    idleClass: btn(idle.node) && btn(idle.node).props.className,
+    idleRadar: btn(idle.node) && btn(idle.node).props['data-radar'],
+    idleCount: countOf(idle.node),
+    reducedMotion: rm ? { hasRule: true, disablesAnimation: /animation:\s*none/.test(rm[1]), coversLive: rm[1].indexOf('.os-status-chip.os-chip-live') >= 0 } : { hasRule: false },
+    registeredClick: regLog.slice(),
+    unregisteredClick: unLog.slice(),
+    unregisteredReturnsPromise: !!pendingClick && typeof pendingClick.then === 'function',
+    store: { heard, selected: store.selectedSourceId, listeners: store.listeners.length, hasSubscribe: typeof store.subscribe, hasSelect: typeof store.selectSource },
+  }
+}
 
 process.stdout.write(JSON.stringify(R))

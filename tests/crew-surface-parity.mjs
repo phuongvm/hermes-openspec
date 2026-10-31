@@ -27,7 +27,7 @@ const sdkShim = sdkNames.map(n => 'export const ' + n + '=(...a)=>a').join(';')
   + ';export const useQuery=()=>({data:undefined,isLoading:false,error:null,refetch(){}})'
   + ';export function cn(...a){return a.filter(Boolean).join(" ")}'
   + ';export const host={navigate(){}}'
-  + ';export const ROUTES_AREA="routes";export const SIDEBAR_NAV_AREA="sidebar.nav";export default {}'
+  + ';export const ROUTES_AREA="routes";export const SIDEBAR_NAV_AREA="sidebar.nav";export const STATUSBAR_AREAS={right:"statusBar.right"};export default {}'
 const reactShim = 'export function useState(v){return[v,()=>{}]};export function useEffect(){};export function useRef(v){return{current:v}};export function useCallback(f){return f};export function useMemo(f){return f()};export default {useState,useEffect,useRef,useCallback,useMemo}'
 const jsxShim = 'export function jsx(c,p,k){return{component:c,props:p,key:k,_t:"jsx"}};export function jsxs(c,p,k){return{component:c,props:p,key:k,_t:"jsxs"}};export function Fragment(p){return p&&p.children}'
 

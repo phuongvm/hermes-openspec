@@ -14,7 +14,7 @@ import {
   Badge, Button, cn, Codicon, CopyButton, Dialog, DialogContent, EmptyState, ErrorState, host,
   Input, Loader, ROUTES_AREA, SearchField, Select,
   SelectContent, SelectItem, SelectTrigger, SelectValue,
-  SegmentedControl, SIDEBAR_NAV_AREA, Tabs, TabsList, TabsTrigger, useQuery
+  SegmentedControl, SIDEBAR_NAV_AREA, STATUSBAR_AREAS, Tabs, TabsList, TabsTrigger, useQuery
 } from '@hermes/plugin-sdk'
 import React from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
@@ -63,7 +63,10 @@ var POLL_INTERVAL_MS = 5000
 // Pure helpers — exported as __test for headless verification
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function sourcesPath() { return '/sources' }
+function sourcesPath(cwd) {
+  var raw = cwd == null ? '' : String(cwd)
+  return raw.trim() ? '/sources?cwd=' + encodeURIComponent(raw) : '/sources'
+}
 
 function changePath(sourceId, name) {
   return '/sources/' + encodeURIComponent(sourceId) + '/changes/' + encodeURIComponent(name)
@@ -455,7 +458,26 @@ function hasUniqueItemToken(item, allItems) {
 }
 
 function createSessionStore() {
-  return { selectedSourceId: null, showArchived: true }
+  var store = {
+    selectedSourceId: null,
+    showArchived: true,
+    pendingSourceId: null,
+    listeners: [],
+    subscribe: function(listener) {
+      store.listeners.push(listener)
+      return function() {
+        var at = store.listeners.indexOf(listener)
+        if (at >= 0) store.listeners.splice(at, 1)
+      }
+    },
+    selectSource: function(sourceId) {
+      store.selectedSourceId = sourceId
+      store.pendingSourceId = sourceId
+      var current = store.listeners.slice()
+      for (var i = 0; i < current.length; i++) current[i](sourceId)
+    },
+  }
+  return store
 }
 
 function resolveRetainedSource(sources, retainedId) {
@@ -844,7 +866,7 @@ function initializeAddedSource(api, result) {
 
 function createApi(ctx) {
   return {
-    sources: function() { return ctx.rest(sourcesPath()) },
+    sources: function(cwd) { return ctx.rest(sourcesPath(cwd)) },
     change: function(sourceId, name) { return ctx.rest(changePath(sourceId, name)) },
     idea: function(sourceId, name) { return ctx.rest(ideaPath(sourceId, name)) },
     specBrowser: function(sourceId, opts) { return ctx.rest(specBrowserPath(sourceId, opts)) },
@@ -2154,8 +2176,23 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
   // for genuinely empty results — only ever runs against the refreshed list.
   var sources = (sourcesQuery.data && sourcesQuery.data.sources) || []
   var previousResolvedInvalid = React.useRef(false)
+  // The status bar chip selects a source through the store (possibly one it just registered): follow it.
+  React.useEffect(function() {
+    if (!sessionStore || typeof sessionStore.subscribe !== 'function') return undefined
+    return sessionStore.subscribe(function(id) { setSelectedSourceId(id) })
+  }, [sessionStore])
   React.useEffect(function() {
     if (sourcesQuery.data === undefined) return
+    if (sessionStore && sessionStore.pendingSourceId != null) {
+      var pendingId = sessionStore.pendingSourceId
+      var known = sources.some(function(s) { return s.id === pendingId })
+      sessionStore.pendingSourceId = null
+      // Just-registered source missing from the cached list: refetch once instead of falling back.
+      if (!known && pendingId === selectedSourceId && typeof sourcesQuery.refetch === 'function') {
+        sourcesQuery.refetch()
+        return
+      }
+    }
     var next = resolveRetainedSource(sources, selectedSourceId)
     var resolved = sources.find(function(s) { return s.id === next }) || null
     var resolvedInvalid = resolved && resolved.valid === false
@@ -2347,6 +2384,145 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Status bar chip — session-folder OpenSpec project (nearest `openspec/` ancestor of host.state.cwd)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var CHIP_CSS = ' @property --os-chip-arc { syntax: "<angle>"; inherits: false; initial-value: 0deg; }' +
+  ' @keyframes os-chip-spin { to { --os-chip-arc: 360deg; } }' +
+  ' @keyframes os-chip-glow { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }' +
+  ' .os-status-chip { position: relative; display: flex; align-items: center; gap: 5px; border: 0; background: none; cursor: pointer; font-size: 11px; padding: 0 4px; border-radius: 4px; color: var(--ui-text-tertiary); }' +
+  ' .os-status-chip:hover { color: var(--ui-text-primary); }' +
+  ' .os-status-chip b { font-weight: 600; color: var(--ui-accent, #60a5fa); }' +
+  ' .os-status-chip.os-chip-live::after { content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;' +
+  ' background: conic-gradient(from var(--os-chip-arc), transparent 0 68%, var(--ui-success, #34d399) 88%, transparent 100%);' +
+  ' -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;' +
+  ' animation: os-chip-spin 2.2s linear infinite; }' +
+  ' .os-status-chip.os-chip-live .codicon { color: var(--ui-success, #34d399); animation: os-chip-glow 2.2s ease-in-out infinite; }' +
+  ' @media (prefers-reduced-motion: reduce) { .os-status-chip.os-chip-live, .os-status-chip.os-chip-live::after, .os-status-chip.os-chip-live .codicon { animation: none; } }'
+
+var CHIP_UNDONE_STATUSES = ['todo', 'in-progress', 'draft']
+
+// Forward-slash, lowercase drive letter, collapsed separators, no trailing slash (roots keep theirs).
+function normalizeFsPath(path) {
+  var p = String(path == null ? '' : path).trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+  if (!p) return ''
+  p = p.replace(/^([A-Za-z]):/, function(_m, d) { return d.toLowerCase() + ':' })
+  if (p.length > 1 && p.charAt(p.length - 1) === '/' && !/^[a-z]:\/$/.test(p)) p = p.replace(/\/+$/, '')
+  return p
+}
+
+function pathWithin(child, root) {
+  if (!child || !root) return false
+  if (child === root) return true
+  return child.indexOf(root.charAt(root.length - 1) === '/' ? root : root + '/') === 0
+}
+
+// Session source = backend-resolved `sessionSource` (nearest ancestor, registered or not); when the backend
+// predates it (undefined) fall back to the longest path-boundary ancestor among the registered sources.
+function resolveSessionOpenSpecSource(sources, cwd, sessionSource) {
+  if (!normalizeFsPath(cwd)) return null
+  if (sessionSource === null) return null
+  if (sessionSource && typeof sessionSource === 'object') return sessionSource
+  var target = normalizeFsPath(cwd)
+  var best = null
+  var bestLen = -1
+  var list = Array.isArray(sources) ? sources : []
+  for (var i = 0; i < list.length; i++) {
+    var src = list[i]
+    if (!src || src.valid === false) continue
+    var root = normalizeFsPath(src.repoRoot || src.path)
+    if (pathWithin(target, root) && root.length > bestLen) { best = src; bestLen = root.length }
+  }
+  return best
+}
+
+function summarizeOpenSpecChip(source) {
+  var hidden = { visible: false, sourceId: null, sourceName: '', sourcePath: '', unregistered: false, undoneCount: 0, runningChangesCount: 0, runningTicketsCount: 0, radar: false }
+  if (!source || source.valid === false) return hidden
+  var changes = (source.openspec && source.openspec.changes) || []
+  var undone = 0
+  var runningChanges = 0
+  var runningTickets = 0
+  for (var i = 0; i < changes.length; i++) {
+    var change = changes[i]
+    if (!change) continue
+    if (CHIP_UNDONE_STATUSES.indexOf(effectiveChangeStatus(change)) >= 0) undone++
+    var running = groupCrewCardsByStatus(crewCardsFor(change)).running.length
+    if (running > 0) { runningChanges++; runningTickets += running }
+  }
+  return {
+    visible: true,
+    sourceId: source.id || null,
+    sourceName: source.name || '',
+    sourcePath: source.path || source.repoRoot || '',
+    unregistered: source.unregistered === true,
+    undoneCount: undone,
+    runningChangesCount: runningChanges,
+    runningTicketsCount: runningTickets,
+    radar: runningTickets > 0,
+  }
+}
+
+function sessionCwdAtom(ctx) {
+  var fromCtx = ctx && ctx.host && ctx.host.state && ctx.host.state.cwd
+  if (fromCtx) return fromCtx
+  return (host && host.state && host.state.cwd) || null
+}
+
+function readAtom(atom) {
+  return atom && typeof atom.get === 'function' ? String(atom.get() || '') : ''
+}
+
+// Click flow: register an unregistered folder first, then select it in the session store, then open /openspec.
+function openSessionSource(summary, api, sessionStore, ctx) {
+  var finish = function(sourceId) {
+    if (sessionStore && sourceId) sessionStore.selectSource(sourceId)
+    navigateToCrewCard(ctx, '/openspec')
+  }
+  if (!summary.unregistered) { finish(summary.sourceId); return null }
+  return Promise.resolve(api.addSource(summary.sourcePath, summary.sourceName)).then(function(result) {
+    finish(result && result.source ? result.source.id : null)
+  })
+}
+
+function OpenSpecStatusChip({ api, sessionStore, ctx }) {
+  var cwdAtom = sessionCwdAtom(ctx)
+  var [cwd, setCwd] = React.useState(readAtom(cwdAtom))
+  var [error, setError] = React.useState('')
+  React.useEffect(function() {
+    if (!cwdAtom || typeof cwdAtom.subscribe !== 'function') return undefined
+    var off = cwdAtom.subscribe(function(value) { setCwd(String(value || '')) })
+    return typeof off === 'function' ? off : undefined
+  }, [cwdAtom])
+  var query = useQuery({
+    queryKey: ['openspec', 'session-source', cwd],
+    queryFn: function() { return api.sources(cwd) },
+    refetchInterval: POLL_INTERVAL_MS,
+    enabled: !!cwd,
+  })
+  var data = query.data || {}
+  var summary = summarizeOpenSpecChip(resolveSessionOpenSpecSource(data.sources, cwd, data.sessionSource))
+  if (!summary.visible) return null
+  var onClick = function() {
+    setError('')
+    var pending = openSessionSource(summary, api, sessionStore, ctx)
+    if (pending && typeof pending.catch === 'function') return pending.catch(function(e) { setError(extractApiError(e)) })
+    return pending
+  }
+  var title = 'OpenSpec ' + summary.sourceName + ': ' + summary.undoneCount + ' undone change' + (summary.undoneCount === 1 ? '' : 's') +
+    (summary.radar ? ' · ' + summary.runningTicketsCount + ' Crew running' : '') +
+    (summary.unregistered ? ' · click to register this folder' : '') + (error ? ' · ' + error : '')
+  var props = { type: 'button', className: 'os-status-chip' + (summary.radar ? ' os-chip-live' : ''), title: title, 'data-openspec-chip': 'true', onClick: onClick }
+  if (summary.radar) props['data-radar'] = 'running'
+  props.children = [
+    jsx('style', { 'data-openspec-chip-styles': 'true', children: CHIP_CSS }, 'css'),
+    jsx(Codicon, { name: 'list-tree' }, 'icon'),
+    jsx('b', { children: String(summary.undoneCount) }, 'count'),
+  ]
+  return jsxs('button', props)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Plugin definition
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2370,6 +2546,12 @@ var plugin = {
         area: SIDEBAR_NAV_AREA,
         order: 50,
         data: { codicon: 'list-tree', label: 'OpenSpec', path: '/openspec', asTile: true }
+      },
+      {
+        id: 'chip',
+        area: STATUSBAR_AREAS.right,
+        order: 120,
+        render: function() { return jsx(OpenSpecStatusChip, { api: api, sessionStore: sessionStore, ctx: ctx }) }
       }
     ])
   }
@@ -2378,6 +2560,11 @@ var plugin = {
 export default plugin
 export const __test = Object.freeze({
   sourcesPath: sourcesPath,
+  normalizeFsPath: normalizeFsPath,
+  resolveSessionOpenSpecSource: resolveSessionOpenSpecSource,
+  summarizeOpenSpecChip: summarizeOpenSpecChip,
+  OpenSpecStatusChip: OpenSpecStatusChip,
+  CHIP_CSS: CHIP_CSS,
   changePath: changePath,
   ideaPath: ideaPath,
   specBrowserPath: specBrowserPath,
