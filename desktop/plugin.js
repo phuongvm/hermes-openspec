@@ -41,6 +41,14 @@ var SURFACE_INLINE_CODE = 'var(--ui-inline-code-background, color-mix(in srgb, c
 var BANNER_ERROR = 'color-mix(in srgb, var(--destructive, #ef4444) 12%, transparent)'
 var BANNER_WARNING = 'color-mix(in srgb, #f59e0b 14%, transparent)'
 
+// Semantic status tokens (Hermes Desktop): readable on Light and Dark because foreground text is mixed in.
+var TOKEN_SUCCESS = 'var(--ui-success, #34d399)'
+var TOKEN_DANGER = 'var(--destructive, #ef4444)'
+var TOKEN_WARNING = '#f59e0b'
+var TOKEN_ACCENT = 'var(--ui-accent, #60a5fa)'
+function semanticText(token) { return 'color-mix(in srgb, ' + token + ' 62%, var(--foreground, currentColor))' }
+function semanticTint(token, pct) { return 'color-mix(in srgb, ' + token + ' ' + (pct || 14) + '%, transparent)' }
+
 var DRAWER_WIDTH_DEFAULT = 540
 var DRAWER_WIDTH_MIN = 380
 var DRAWER_WIDTH_MAX = 960
@@ -565,6 +573,33 @@ function parseTasks(content) {
   return { total: total, done: done, sections: sections }
 }
 
+function splitTableRow(line) {
+  var s = String(line).trim()
+  if (s.charAt(0) === '|') s = s.slice(1)
+  if (s.length > 0 && s.charAt(s.length - 1) === '|' && s.charAt(s.length - 2) !== '\\') s = s.slice(0, -1)
+  var cells = []
+  var cur = ''
+  for (var i = 0; i < s.length; i++) {
+    var ch = s.charAt(i)
+    if (ch === '\\' && s.charAt(i + 1) === '|') { cur += '|'; i++; continue }
+    if (ch === '|') { cells.push(cur.trim()); cur = ''; continue }
+    cur += ch
+  }
+  cells.push(cur.trim())
+  return cells
+}
+
+function isTableSeparator(line) {
+  var s = String(line)
+  return s.indexOf('|') >= 0 && s.indexOf('-') >= 0 && /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(s)
+}
+
+function tableAlign(cell) {
+  var left = cell.charAt(0) === ':'
+  var right = cell.charAt(cell.length - 1) === ':'
+  return left && right ? 'center' : right ? 'right' : 'left'
+}
+
 function renderMarkdown(content) {
   if (!content) return []
   var elements = []
@@ -589,6 +624,33 @@ function renderMarkdown(content) {
     if (headingMatch) {
       elements.push({ type: 'heading', level: headingMatch[1].length, text: headingMatch[2] })
       i++; continue
+    }
+
+    // Horizontal rule
+    if (line.match(/^\s{0,3}([-*_])(\s*\1){2,}\s*$/)) {
+      elements.push({ type: 'hr' })
+      i++; continue
+    }
+
+    // Blockquote (consecutive > lines)
+    if (line.match(/^\s{0,3}>/)) {
+      var quoteLines = []
+      while (i < lines.length && lines[i].match(/^\s{0,3}>/)) { quoteLines.push(lines[i].replace(/^\s{0,3}>\s?/, '')); i++ }
+      elements.push({ type: 'blockquote', lines: quoteLines })
+      continue
+    }
+
+    // Table (header row + separator row + body rows)
+    if (line.indexOf('|') >= 0 && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      var header = splitTableRow(line)
+      var sepCells = splitTableRow(lines[i + 1])
+      if (header.length === sepCells.length) {
+        var tableRows = []
+        i += 2
+        while (i < lines.length && lines[i].trim() !== '' && lines[i].indexOf('|') >= 0) { tableRows.push(splitTableRow(lines[i])); i++ }
+        elements.push({ type: 'table', header: header, align: sepCells.map(tableAlign), rows: tableRows })
+        continue
+      }
     }
 
     // Unordered list
@@ -735,7 +797,7 @@ function renderInline(text) {
   if (!text) return text
   var parts = []
   var remaining = text
-  var regex = /(\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/g
+  var regex = /(\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)|\*([^*\s][^*]*?)\*|(?<![A-Za-z0-9_])_([^_\s][^_]*?)_(?![A-Za-z0-9_]))/g
   var lastIndex = 0
   var match
   while ((match = regex.exec(remaining)) !== null) {
@@ -744,15 +806,46 @@ function renderInline(text) {
     else if (match[3]) parts.push(jsx('code', { style: { background: SURFACE_INLINE_CODE, color: 'var(--ui-inline-code-foreground, inherit)', padding: '1px 4px', borderRadius: '3px', fontFamily: 'monospace', fontSize: '0.9em' }, children: match[3] }))
     else if (match[4]) {
       if (isSafeUrl(match[5])) {
-        parts.push(jsx('a', { href: match[5], target: '_blank', rel: 'noopener noreferrer', style: { color: 'var(--link-foreground, #4fc3f7)', textDecoration: 'underline' }, children: match[4] }))
+        parts.push(jsx('a', { href: match[5], target: '_blank', rel: 'noopener noreferrer', style: { color: semanticText(TOKEN_ACCENT), textDecoration: 'underline' }, children: match[4] }))
       } else {
-        parts.push(jsx('span', { style: { color: 'var(--muted-foreground, #888)' }, children: match[4] + ' [unsafe link]' }))
+        parts.push(jsx('span', { style: { color: 'var(--muted-foreground, inherit)' }, children: match[4] + ' [unsafe link]' }))
       }
     }
+    else if (match[6] || match[7]) parts.push(jsx('em', { style: { fontStyle: 'italic' }, children: match[6] || match[7] }))
     lastIndex = match.index + match[0].length
   }
   if (lastIndex < remaining.length) parts.push(remaining.slice(lastIndex))
   return parts
+}
+
+var HEADING_STYLES = {
+  1: { fontSize: '1.4em', fontWeight: 700, margin: '14px 0 8px', paddingBottom: '4px', borderBottom: BORDER_SUBTLE, color: 'var(--foreground, inherit)' },
+  2: { fontSize: '1.2em', fontWeight: 700, margin: '12px 0 6px', paddingBottom: '3px', borderBottom: BORDER_SUBTLE, color: 'var(--foreground, inherit)' },
+  3: { fontSize: '1.08em', fontWeight: 600, margin: '10px 0 4px', color: 'var(--foreground, inherit)' },
+  4: { fontSize: '1em', fontWeight: 600, margin: '8px 0 4px', color: 'color-mix(in srgb, var(--foreground, currentColor) 78%, transparent)' },
+}
+
+function headingStyle(level) { return HEADING_STYLES[Math.min(Math.max(level || 1, 1), 4)] }
+
+function diffLineStyle(cls) {
+  var style = { display: 'block', padding: '1px 4px', color: 'var(--foreground, inherit)' }
+  if (cls === 'added') { style.color = semanticText(TOKEN_SUCCESS); style.background = semanticTint(TOKEN_SUCCESS, 12) }
+  else if (cls === 'removed') { style.color = semanticText(TOKEN_DANGER); style.background = semanticTint(TOKEN_DANGER, 12) }
+  else if (cls === 'hunk') { style.color = semanticText(TOKEN_ACCENT); style.background = semanticTint(TOKEN_ACCENT, 8) }
+  return style
+}
+
+function MarkdownTable(el) {
+  var align = el.align || []
+  function cellStyle(i, isHead) {
+    return { border: BORDER_SUBTLE, padding: '4px 8px', textAlign: align[i] || 'left', verticalAlign: 'top', fontWeight: isHead ? 600 : 400, background: isHead ? SURFACE_CODE : 'transparent', color: 'var(--foreground, inherit)' }
+  }
+  return jsx('div', { style: { overflowX: 'auto', margin: '6px 0' }, children: jsxs('table', { style: { borderCollapse: 'collapse', width: '100%', fontSize: '0.95em' }, children: [
+    jsx('thead', { children: jsx('tr', { children: (el.header || []).map(function(cell, i) { return jsx('th', { style: cellStyle(i, true), children: renderInline(cell) }, i) }) }) }),
+    jsx('tbody', { children: (el.rows || []).map(function(row, r) {
+      return jsx('tr', { children: (el.header || []).map(function(_h, i) { return jsx('td', { style: cellStyle(i, false), children: renderInline(row[i] || '') }, i) }) }, r)
+    }) }),
+  ] }) })
 }
 
 function MarkdownElement(el) {
@@ -761,7 +854,7 @@ function MarkdownElement(el) {
   if (!el || !el.type) return null
   switch (el.type) {
     case 'heading':
-      return jsx('div', { style: { fontWeight: 'bold', fontSize: el.level <= 2 ? '1.1em' : '1em', margin: '8px 0 4px', color: 'var(--foreground, inherit)' }, children: renderInline(el.text) })
+      return jsx('div', { 'data-md-heading': String(el.level), style: headingStyle(el.level), children: renderInline(el.text) })
     case 'paragraph':
       return jsx('div', { style: { margin: '4px 0', color: 'var(--foreground, inherit)' }, children: renderInline(el.text) })
     case 'list-item':
@@ -769,8 +862,22 @@ function MarkdownElement(el) {
         el.ordered ? '  ' : '\u2022 ',
         renderInline(el.text)
       ] })
-    case 'fenced':
-      return jsx('pre', { style: { background: SURFACE_CODE, border: BORDER_SUBTLE, padding: '8px', borderRadius: '4px', margin: '4px 0', overflow: 'auto', fontFamily: 'monospace', fontSize: '0.9em', color: 'var(--foreground, inherit)' }, children: el.content })
+    case 'blockquote':
+      return jsx('div', { 'data-md-blockquote': 'true', style: { margin: '6px 0', padding: '4px 12px', borderLeft: '3px solid ' + semanticTint(TOKEN_ACCENT, 70), background: semanticTint(TOKEN_ACCENT, 8), borderRadius: '0 4px 4px 0', color: 'color-mix(in srgb, var(--foreground, currentColor) 82%, transparent)' }, children: (el.lines || []).map(function(line, i) { return jsx('div', { children: renderInline(line) }, i) }) })
+    case 'hr':
+      return jsx('hr', { 'data-md-hr': 'true', style: { border: 'none', borderTop: BORDER_SUBTLE, margin: '12px 0' } })
+    case 'table':
+      return jsx(MarkdownTable, { header: el.header, rows: el.rows, align: el.align })
+    case 'fenced': {
+      var isDiff = el.lang === 'diff' || el.lang === 'patch'
+      var codeChildren = isDiff
+        ? String(el.content || '').split('\n').map(function(line, i) { return jsx('span', { style: diffLineStyle(classifyDiffLine(line)), children: line + '\n' }, i) })
+        : el.content
+      return jsxs('div', { style: { margin: '4px 0' }, children: [
+        el.lang ? jsx('div', { style: { fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--muted-foreground, inherit)', opacity: 0.8, marginBottom: '2px' }, children: el.lang }) : null,
+        jsx('pre', { style: { background: SURFACE_CODE, border: BORDER_SUBTLE, padding: '8px', borderRadius: '4px', margin: 0, overflow: 'auto', fontFamily: 'monospace', fontSize: '0.9em', color: 'var(--foreground, inherit)' }, children: codeChildren }),
+      ] })
+    }
     default:
       return null
   }
@@ -1408,7 +1515,7 @@ function TaskView({ content }) {
         jsx('div', { style: { fontWeight: 600, fontSize: '14px', marginBottom: '4px', color: 'var(--foreground, inherit)' }, children: section.title }),
         section.tasks.map(function(task, j) {
           return jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '2px 0', color: 'var(--foreground, inherit)' }, children: [
-            jsx('span', { style: { color: task.done ? 'var(--primary, #4caf50)' : 'var(--muted-foreground, #888)' }, children: task.done ? '\u2611' : '\u2610' }),
+            jsx('span', { 'data-task-state': task.done ? 'done' : 'open', style: { color: task.done ? semanticText(TOKEN_SUCCESS) : 'var(--muted-foreground, inherit)' }, children: task.done ? '\u2611' : '\u2610' }),
             jsx('span', { style: { fontSize: '13px', textDecoration: task.done ? 'line-through' : 'none', opacity: task.done ? 0.6 : 1 }, children: task.text }),
           ] }, j)
         }),
@@ -1508,17 +1615,17 @@ function normalizeSemanticGroups(data) {
   var removed = reqs.removed || []
   for (var i = 0; i < added.length; i++) {
     var a = added[i]
-    items.push({ label: 'Added', name: a.name || '', description: a.description || '', color: 'var(--primary, #4caf50)' })
+    items.push({ label: 'Added', name: a.name || '', description: a.description || '', color: TOKEN_SUCCESS })
   }
   for (var j = 0; j < modified.length; j++) {
     var m = modified[j]
     var beforeDesc = m.before && typeof m.before === 'object' ? (m.before.description || '') : String(m.before || '')
     var afterDesc = m.after && typeof m.after === 'object' ? (m.after.description || '') : String(m.after || '')
-    items.push({ label: 'Modified', name: m.name || '', description: '', before: beforeDesc, after: afterDesc, color: 'var(--warning, #ff9800)' })
+    items.push({ label: 'Modified', name: m.name || '', description: '', before: beforeDesc, after: afterDesc, color: TOKEN_WARNING })
   }
   for (var k = 0; k < removed.length; k++) {
     var r = removed[k]
-    items.push({ label: 'Removed', name: r.name || '', description: r.description || '', color: 'var(--destructive, #f44336)' })
+    items.push({ label: 'Removed', name: r.name || '', description: r.description || '', color: TOKEN_DANGER })
   }
   return items
 }
@@ -1531,12 +1638,12 @@ function SemanticDiffView({ data }) {
     items.map(function(item, i) {
       return jsxs('div', { style: { marginBottom: '8px', padding: '8px', background: SURFACE_CODE, borderRadius: '4px', border: BORDER_SUBTLE }, children: [
         jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }, children: [
-          jsx('span', { style: { fontSize: '10px', fontWeight: 600, padding: '1px 5px', borderRadius: '3px', background: item.color, color: '#fff' }, children: item.label }),
+          jsx('span', { style: { fontSize: '10px', fontWeight: 600, padding: '1px 5px', borderRadius: '3px', background: semanticTint(item.color, 22), color: 'var(--foreground, inherit)', border: '1px solid ' + semanticTint(item.color, 60) }, children: item.label }),
           item.name ? jsx('span', { style: { fontWeight: 500, color: 'var(--foreground, inherit)' }, children: item.name }) : null,
         ] }),
         item.description ? jsx('div', { style: { fontSize: '12px', color: 'var(--muted-foreground, #888)', marginBottom: '2px' }, children: item.description }) : null,
-        item.before != null && item.before !== '' ? jsx('div', { style: { color: 'var(--destructive, #f44336)', fontSize: '12px', marginBottom: '2px' }, children: '- ' + item.before }) : null,
-        item.after != null && item.after !== '' ? jsx('div', { style: { color: 'var(--primary, #4caf50)', fontSize: '12px' }, children: '+ ' + item.after }) : null,
+        item.before != null && item.before !== '' ? jsx('div', { style: { color: semanticText(TOKEN_DANGER), background: semanticTint(TOKEN_DANGER, 10), fontSize: '12px', marginBottom: '2px', padding: '1px 4px', borderRadius: '2px' }, children: '- ' + item.before }) : null,
+        item.after != null && item.after !== '' ? jsx('div', { style: { color: semanticText(TOKEN_SUCCESS), background: semanticTint(TOKEN_SUCCESS, 10), fontSize: '12px', padding: '1px 4px', borderRadius: '2px' }, children: '+ ' + item.after }) : null,
       ] }, i)
     }),
   ] })
@@ -1560,12 +1667,7 @@ function RawDiffView({ diff }) {
   var lines = Array.isArray(diff) ? diff : String(diff).split('\n')
   return jsxs('pre', { style: { fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', padding: '8px', background: SURFACE_CODE, border: BORDER_SUBTLE, borderRadius: '4px', margin: 0 }, children: lines.map(function(line, i) {
     var cls = classifyDiffLine(line)
-    var style = { display: 'block', padding: '1px 4px' }
-    if (cls === 'added') style.color = 'var(--primary, #4caf50)'
-    else if (cls === 'removed') style.color = 'var(--destructive, #f44336)'
-    else if (cls === 'hunk') style.color = 'var(--muted-foreground, #888)'
-    else style.color = 'var(--foreground, inherit)'
-    return jsx('span', { style: style, children: line + '\n' }, i)
+    return jsx('span', { 'data-diff-line': cls, style: diffLineStyle(cls), children: line + '\n' }, i)
   }) })
 }
 
@@ -1950,7 +2052,7 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
         selectedSource.path ? jsxs('div', { style: { fontFamily: 'monospace', fontSize: '11px', marginTop: '4px', opacity: 0.7 }, children: ['Path: ', selectedSource.path] }) : null,
       ] }),
       selectedSource.error === 'No openspec/ directory found' ? jsx(Button, { size: 'sm', onClick: handleInitSource, disabled: initBusy, style: { marginTop: '10px' }, children: initBusy ? 'Initializing...' : 'Initialize OpenSpec' }) : null,
-      initError ? jsx('div', { style: { marginTop: '8px', color: 'var(--destructive, #f44336)', fontSize: '12px' }, children: initError }) : null,
+      initError ? jsx('div', { style: { marginTop: '8px', color: semanticText(TOKEN_DANGER), fontSize: '12px' }, children: initError }) : null,
     ] }) }) : null,
 
     // View body
@@ -2064,6 +2166,12 @@ export const __test = Object.freeze({
   effectiveDiffMode: effectiveDiffMode,
   isSafeUrl: isSafeUrl,
   renderInline: renderInline,
+  MarkdownTable: MarkdownTable,
+  headingStyle: headingStyle,
+  semanticText: semanticText,
+  SemanticDiffView: SemanticDiffView,
+  RawDiffView: RawDiffView,
+  TaskView: TaskView,
   MarkdownElement: MarkdownElement,
   RetryErrorState: RetryErrorState,
   autoCollapseEmptyLanes: autoCollapseEmptyLanes,

@@ -430,4 +430,53 @@ R.slice3 = safe(() => {
   }
 })
 
+// Slice 3b — structured Markdown + semantic diff/task tokens
+R.slice3b = safe(() => {
+  const MD = [
+    '# H1 title', '## H2 title', '### H3 title', '#### H4 title', '',
+    '| Name | Qty |', '| :--- | ---: |', '| apple | 3 |', '| pear \\| green | 4 |', '',
+    '> quoted **bold**', '> second line', '', '---', '',
+    'Some *italic* and _under_ and **bold** text with `code` and [ok](https://example.com) and [bad](javascript:alert(1)).', '',
+    '```diff', '+added', '-removed', '@@ hunk', ' ctx', '```',
+  ].join('\n')
+  const blocks = t.renderMarkdown(MD)
+  const types = blocks.map(b => b.type)
+  const table = blocks.find(b => b.type === 'table')
+  const rendered = blocks.map(b => t.MarkdownElement(b))
+  const headings = rendered.filter(n => n && n.props && n.props['data-md-heading']).map(n => ({ lvl: n.props['data-md-heading'], fs: n.props.style.fontSize, fw: n.props.style.fontWeight }))
+  const tableNode = rendered[blocks.findIndex(b => b.type === 'table')]
+  const tableFn = tableNode.component
+  const tableTree = tableFn(tableNode.props)
+  const ths = find(tableTree, n => n.component === 'th')
+  const tds = find(tableTree, n => n.component === 'td')
+  const bq = rendered.find(n => n && n.props && n.props['data-md-blockquote'])
+  const hr = rendered.find(n => n && n.props && n.props['data-md-hr'])
+  const para = blocks.find(b => b.type === 'paragraph')
+  const inl = t.renderInline(para.text)
+  const em = inl.filter(n => n && n.component === 'em').map(n => n.props.children)
+  const link = inl.filter(n => n && n.component === 'a')[0]
+  const fenced = rendered[blocks.findIndex(b => b.type === 'fenced')]
+  const diffSpans = find(fenced, n => n.props && n.props.style && n.component === 'span' && n.props.style.display === 'block')
+  // semantic diff + task + raw diff
+  const sem = t.SemanticDiffView({ data: { requirements: { added: [{ name: 'A', description: 'd' }], modified: [{ name: 'M', before: 'old', after: 'new' }], removed: [{ name: 'R', description: 'x' }] } } })
+  const badges = find(sem, n => n.component === 'span' && n.props.style && n.props.style.fontWeight === 600)
+  const raw = t.RawDiffView({ diff: '+a\n-b\n@@ h\n c' })
+  const rawLines = find(raw, n => n.props && n.props['data-diff-line'])
+  const task = t.TaskView({ content: '## S\n- [x] done\n- [ ] open' })
+  const taskMarks = find(task, n => n.props && n.props['data-task-state'])
+  return {
+    types, headings,
+    tableHeader: table.header, tableRows: table.rows, tableAlign: table.align,
+    thCount: ths.length, tdCount: tds.length,
+    thBorder: ths[0] && ths[0].props.style.border, thBg: ths[0] && ths[0].props.style.background, tdAlign: tds[1] && tds[1].props.style.textAlign,
+    bqLines: blocks.find(b => b.type === 'blockquote').lines, bqBorder: bq && bq.props.style.borderLeft,
+    hrBorder: hr && hr.props.style.borderTop,
+    em, linkColor: link && link.props.style.color, unsafe: texts(inl).indexOf('[unsafe link]') >= 0,
+    diffColors: diffSpans.map(n => n.props.style.color),
+    semBadgeBg: badges.map(n => n.props.style.background), semBadgeFg: badges.map(n => n.props.style.color),
+    rawKinds: rawLines.map(n => n.props['data-diff-line']), rawColors: rawLines.map(n => n.props.style.color),
+    taskStates: taskMarks.map(n => n.props['data-task-state']), taskDoneColor: taskMarks[0] && taskMarks[0].props.style.color,
+  }
+})
+
 process.stdout.write(JSON.stringify(R))

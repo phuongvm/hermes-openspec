@@ -2677,6 +2677,30 @@ console.log('\n[Slice 3] Live Crew promotion, radar scanning, resizable drawers,
   check(ws3.firstRadar === 'running' && ws3.secondRadar === null && String((ws3.cardOrder || [])[0]).includes('Alpha'), 'Web Board promotes running change above lower-sequence idle change with data-radar="running"', JSON.stringify(ws3))
   check(JSON.stringify(ws3.dlgBadges) === '["Checklist: 0/7","Crew: 3/5 done · 1 running"]' && ws3.hasModalSash === true, 'Web DetailDialog shows Checklist + Crew badges and resize sash', JSON.stringify(ws3))
 
+  // Slice 3b: structured Markdown + semantic diff/task tokens (Desktop)
+  const m3 = (s2 && s2.slice3b) || {}
+  check(!m3.__error, 'Slice 3b driver renders structured Markdown', m3.__error)
+  check(JSON.stringify(m3.types) === '["heading","heading","heading","heading","table","blockquote","hr","paragraph","fenced"]', 'renderMarkdown parses headings, table, blockquote, hr, paragraph, fenced', JSON.stringify(m3.types))
+  check(JSON.stringify((m3.headings || []).map(h => h.lvl + ':' + h.fs + ':' + h.fw)) === '["1:1.4em:700","2:1.2em:700","3:1.08em:600","4:1em:600"]', 'H1-H4 render a distinct size/weight hierarchy', JSON.stringify(m3.headings))
+  check(JSON.stringify(m3.tableHeader) === '["Name","Qty"]' && JSON.stringify(m3.tableRows) === '[["apple","3"],["pear | green","4"]]' && JSON.stringify(m3.tableAlign) === '["left","right"]', 'Markdown table parses header, rows, escaped pipe and alignment', JSON.stringify([m3.tableHeader, m3.tableRows, m3.tableAlign]))
+  check(m3.thCount === 2 && m3.tdCount === 4 && String(m3.thBorder).includes('--ui-stroke-tertiary') && String(m3.thBg).includes('--ui-bg-elevated') && m3.tdAlign === 'right', 'Table cells use theme-native border/background tokens and alignment', JSON.stringify([m3.thCount, m3.tdCount, m3.thBorder, m3.thBg, m3.tdAlign]))
+  check(JSON.stringify(m3.bqLines) === '["quoted **bold**","second line"]' && String(m3.bqBorder).includes('--ui-accent'), 'Blockquote groups > lines with accent rail', JSON.stringify([m3.bqLines, m3.bqBorder]))
+  check(String(m3.hrBorder).includes('--ui-stroke-tertiary'), 'Horizontal rule renders theme-native divider', JSON.stringify(m3.hrBorder))
+  check(JSON.stringify(m3.em) === '["italic","under"]', 'renderInline renders *italic* and _italic_ as <em>', JSON.stringify(m3.em))
+  check(String(m3.linkColor).includes('--ui-accent') && !String(m3.linkColor).includes('link-foreground') && m3.unsafe === true, 'Safe links use --ui-accent; javascript: links stay unsafe', JSON.stringify([m3.linkColor, m3.unsafe]))
+  check(JSON.stringify((m3.diffColors || []).map(c => /--ui-success/.test(c) ? 'ok' : /--destructive/.test(c) ? 'bad' : /--ui-accent/.test(c) ? 'hunk' : 'ctx')) === '["ok","bad","hunk","ctx"]', 'Fenced diff blocks colour +/-/@@/context lines semantically', JSON.stringify(m3.diffColors))
+  check((m3.semBadgeBg || []).length === 3 && m3.semBadgeBg.every(b => b.includes('color-mix')) && m3.semBadgeFg.every(c => c === 'var(--foreground, inherit)'), 'SemanticDiffView badges use tinted bg with --foreground text (no #fff)', JSON.stringify([m3.semBadgeBg, m3.semBadgeFg]))
+  check(JSON.stringify(m3.rawKinds) === '["added","removed","hunk","context"]' && /--ui-success/.test(m3.rawColors[0]) && /--destructive/.test(m3.rawColors[1]), 'RawDiffView colours added/removed lines with semantic tokens', JSON.stringify(m3.rawColors))
+  check(JSON.stringify(m3.taskStates) === '["done","open"]' && /--ui-success/.test(m3.taskDoneColor), 'TaskView done marker uses --ui-success', JSON.stringify([m3.taskStates, m3.taskDoneColor]))
+  const staleTokens = ['--primary, #4caf50', "color: '#fff'", '--link-foreground', '#ff9800', '#f44336', '#4fc3f7'].filter(tok => source.includes(tok))
+  check(staleTokens.length === 0, 'desktop/plugin.js has no stale --primary/#fff/--link-foreground diff, task or link tokens', staleTokens.join(', '))
+  const w3b = ((web && web.slice3bMd) || {}).html || ''
+  check(/<h1>H1<\/h1>/.test(w3b) && /<h4>H4<\/h4>/.test(w3b), 'Web markdown renders H1 and H4', w3b)
+  check(/<table class="os-table">.*<th style="text-align:left">Name<\/th>.*<th style="text-align:right">Qty<\/th>.*<td style="text-align:right">3<\/td>/.test(w3b.replace(/\n/g, '')), 'Web markdown renders a table with alignment', w3b)
+  check(/<blockquote class="os-quote">quote line<\/blockquote>/.test(w3b) && /<hr class="os-hr"\/>/.test(w3b), 'Web markdown renders blockquote and hr', w3b)
+  check(/<em>it<\/em>/.test(w3b) && /<em>un<\/em>/.test(w3b) && /<strong>b<\/strong>/.test(w3b) && /href="https:\/\/example\.com"/.test(w3b) && !/href="javascript:/.test(w3b) && w3b.includes('[unsafe link]'), 'Web inline: italic, bold, safe link; javascript: link neutralised', w3b)
+  check(webCss.includes('.os-md .os-table') && webCss.includes('.os-md .os-quote') && webCss.includes('.os-md h1 {') && webCss.includes('--ui-success'), 'dashboard/dist/style.css styles table, blockquote, H1-H4 and semantic delta tokens')
+
   // Cross-surface parity suite
   let parityOk = false
   let parityOut = ''

@@ -63,7 +63,7 @@ sandbox.window.window = sandbox.window
 sandbox.React = sandbox.window.__HERMES_PLUGIN_SDK__.React
 vm.createContext(sandbox)
 
-const injected = src.replace(/\}\)\(\);\s*$/, 'window.__OS_TEST__ = { ReviewsTab: ReviewsTab, CrewCards: CrewCards, ExplorationList: ExplorationList, ExplorationsPanel: ExplorationsPanel, ChangeDetailTabs: ChangeDetailTabs, DiscoverDialog: DiscoverDialog, ExplorationDialog: ExplorationDialog, Toolbar: Toolbar, Board: Board, DetailDialog: DetailDialog, Modal: Modal, scopeLabel: scopeLabel, verdictClass: verdictClass, sortExplorations: sortExplorations, getExploration: getExploration, discoverSources: discoverSources };\n})();')
+const injected = src.replace(/\}\)\(\);\s*$/, 'window.__OS_TEST__ = { ReviewsTab: ReviewsTab, CrewCards: CrewCards, ExplorationList: ExplorationList, ExplorationsPanel: ExplorationsPanel, ChangeDetailTabs: ChangeDetailTabs, DiscoverDialog: DiscoverDialog, ExplorationDialog: ExplorationDialog, Toolbar: Toolbar, Board: Board, DetailDialog: DetailDialog, Modal: Modal, scopeLabel: scopeLabel, verdictClass: verdictClass, sortExplorations: sortExplorations, getExploration: getExploration, discoverSources: discoverSources, renderMarkdown: renderMarkdown };\n})();')
 if (injected === src) throw new Error('could not inject test export')
 vm.runInContext(injected, sandbox, { filename: 'dashboard/dist/index.js' })
 const T = sandbox.window.__OS_TEST__
@@ -198,5 +198,10 @@ const SRC = {
     hasModalSash: collect(dlg, n => n.props && n.props.className === 'os-modal-sash').length === 1,
   }
 }
+
+R.slice3bMd = (() => {
+  const md = ['# H1', '#### H4', '', '| Name | Qty |', '| :--- | ---: |', '| a | 3 |', '', '> quote line', '', '---', '', 'x *it* _un_ **b** [ok](https://example.com) [bad](javascript:alert(1))'].join('\n')
+  return { html: T.renderMarkdown(md) }
+})()
 
 process.stdout.write(JSON.stringify(R))

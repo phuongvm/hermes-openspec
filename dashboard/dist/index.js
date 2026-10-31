@@ -75,9 +75,29 @@
     s = esc(s);
     s = s.replace(/`([^`]+)`/g, '<code class="os-code">$1</code>');
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    s = s.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    s = s.replace(/\*([^*\s][^*]*?)\*/g, "<em>$1</em>");
+    s = s.replace(/(^|[^A-Za-z0-9_])_([^_\s][^_]*?)_(?![A-Za-z0-9_])/g, "$1<em>$2</em>");
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function (_m, label, url) {
+      return /^\s*(https?:\/\/|mailto:|\/(?!\/)|#|\?)/i.test(url) ? '<a href="' + url.replace(/"/g, "%22") + '" target="_blank" rel="noopener noreferrer">' + label + "</a>" : label + " [unsafe link]";
+    });
     return s;
+  }
+  function splitRow(line) {
+    var s = String(line).trim();
+    if (s.charAt(0) === "|") s = s.slice(1);
+    if (s.length > 0 && s.charAt(s.length - 1) === "|" && s.charAt(s.length - 2) !== "\\") s = s.slice(0, -1);
+    var cells = [], cur = "";
+    for (var k = 0; k < s.length; k++) {
+      var ch = s.charAt(k);
+      if (ch === "\\" && s.charAt(k + 1) === "|") { cur += "|"; k++; continue; }
+      if (ch === "|") { cells.push(cur.trim()); cur = ""; continue; }
+      cur += ch;
+    }
+    cells.push(cur.trim());
+    return cells;
+  }
+  function isTableSep(line) {
+    return line.indexOf("|") >= 0 && line.indexOf("-") >= 0 && /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(line);
   }
   function renderMarkdown(md) {
     if (!md) return "";
@@ -107,6 +127,36 @@
       if (hm) { flushPara(); flushList(); var lvl = hm[1].length; html.push("<h" + lvl + ">" + inline(hm[2]) + "</h" + lvl + ">"); i++; continue; }
       // hr
       if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flushPara(); flushList(); html.push('<hr class="os-hr"/>'); i++; continue; }
+      // blockquote (consecutive > lines)
+      if (/^\s{0,3}>/.test(line)) {
+        flushPara(); flushList();
+        var q = [];
+        while (i < lines.length && /^\s{0,3}>/.test(lines[i])) { q.push(inline(lines[i].replace(/^\s{0,3}>\s?/, ""))); i++; }
+        html.push('<blockquote class="os-quote">' + q.join("<br/>") + "</blockquote>");
+        continue;
+      }
+      // table (header row + separator row + body rows)
+      if (line.indexOf("|") >= 0 && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+        var head = splitRow(line), sep = splitRow(lines[i + 1]);
+        if (head.length === sep.length) {
+          flushPara(); flushList();
+          var al = sep.map(function (c) { var l = c.charAt(0) === ":", r = c.charAt(c.length - 1) === ":"; return l && r ? "center" : r ? "right" : "left"; });
+          var t = ['<div class="os-table-wrap"><table class="os-table"><thead><tr>'];
+          head.forEach(function (c, ci) { t.push('<th style="text-align:' + al[ci] + '">' + inline(c) + "</th>"); });
+          t.push("</tr></thead><tbody>");
+          i += 2;
+          while (i < lines.length && lines[i].trim() !== "" && lines[i].indexOf("|") >= 0) {
+            var cells = splitRow(lines[i]);
+            t.push("<tr>");
+            head.forEach(function (_c, ci) { t.push('<td style="text-align:' + al[ci] + '">' + inline(cells[ci] || "") + "</td>"); });
+            t.push("</tr>");
+            i++;
+          }
+          t.push("</tbody></table></div>");
+          html.push(t.join(""));
+          continue;
+        }
+      }
       // list item
       var lm = line.match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
       if (lm) {
