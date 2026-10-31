@@ -654,11 +654,10 @@ def _spec_detail(root: Path, spec_path: str) -> Optional[dict[str, Any]]:
         return None
     if not candidate.is_file():
         return None
-    return {
-        "path": spec_path,
-        "title": _title_from_markdown(candidate, spec_path),
-        "content": _read_doc(candidate) or "",
-    }
+    content = _read_doc(candidate) or ""
+    meta = _spec_meta(content, spec_path)
+    meta["title"] = meta["title"] if meta["title"] != spec_path else _title_from_markdown(candidate, spec_path)
+    return {"path": spec_path, "content": content, **meta}
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +812,27 @@ def _spec_title_from_content(content: Optional[str], fallback: str) -> str:
     return fallback
 
 
+def _spec_meta(content: Optional[str], rel: str) -> dict[str, Any]:
+    """Structured metadata for a spec entry, derived via the shared ``spec_parser``."""
+    domain = rel.split("/", 1)[0] if "/" in rel else Path(rel).stem
+    fallback = _spec_title_from_content(content, rel)
+    parsed = {"title": "", "purpose": "", "requirements": []}
+    mod = _load_spec_parser()
+    if mod is not None and content:
+        try:
+            parsed = mod.parse_spec(content)
+        except Exception:
+            pass
+    reqs = parsed.get("requirements") or []
+    return {
+        "domain": domain,
+        "title": parsed.get("title") or fallback,
+        "purpose": parsed.get("purpose") or "",
+        "requirementCount": len(reqs),
+        "scenarioCount": sum(len(r.get("scenarios") or []) for r in reqs),
+    }
+
+
 def _spec_diff(before: Optional[str], after: Optional[str], path: str) -> str:
     return "\n".join(
         difflib.unified_diff(
@@ -848,8 +868,14 @@ def _compute_semantic_summary(before: Optional[str], after: Optional[str]) -> Op
         return None
 
 
+_SPEC_PARSER_MOD = None
+
+
 def _load_spec_parser():
-    """Import the shared spec_parser module from the plugin root."""
+    """Import the shared spec_parser module from the plugin root (cached)."""
+    global _SPEC_PARSER_MOD
+    if _SPEC_PARSER_MOD is not None:
+        return _SPEC_PARSER_MOD
     import importlib.util
     candidate = Path(__file__).resolve().parent.parent / "spec_parser.py"
     if not candidate.is_file():
@@ -859,6 +885,7 @@ def _load_spec_parser():
         return None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    _SPEC_PARSER_MOD = mod
     return mod
 
 
@@ -909,7 +936,7 @@ def _spec_browser(root: Path, before: str = "", after: str = "", dirty: bool = F
             files.append({
                 "path": rel,
                 "token": _change_token(f"spec:{rel}"),
-                "title": _spec_title_from_content(after_content, rel),
+                **_spec_meta(after_content, rel),
                 "status": "current" if after_content is not None else "missing",
                 "changed": False,
                 "mtime": gd.get("mtime") or _worktree_spec_mtime(root, rel),
@@ -937,7 +964,7 @@ def _spec_browser(root: Path, before: str = "", after: str = "", dirty: bool = F
         files.append({
             "path": rel,
             "token": _change_token(f"spec:{rel}"),
-            "title": _spec_title_from_content(after_content if after_content is not None else before_content, rel),
+            **_spec_meta(after_content if after_content is not None else before_content, rel),
             "status": status,
             "changed": status not in {"unchanged", "missing"},
             "mtime": mtime,

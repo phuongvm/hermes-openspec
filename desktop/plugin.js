@@ -320,6 +320,101 @@ function stripFrontmatter(content) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Slice 3c helpers — spec parsing, spec filtering, exploration scope slug
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Mirrors spec_parser.parse_spec: { title, purpose, requirements: [{ name, description, scenarios: [{ name, steps: [{ type, text }] }] }] }.
+function parseSpec(md) {
+  if (!md) return { title: '', purpose: '', requirements: [] }
+  var lines = String(md).split('\n')
+  var title = ''
+  var purpose = ''
+  var reqs = []
+  var state = 'top'
+  var currentReq = null
+  var currentScn = null
+  for (var i = 0; i < lines.length; i++) {
+    var trim = lines[i].trim()
+    if (trim.indexOf('# ') === 0) { title = trim.replace(/^#\s+/, '').replace(/\s+Specification\s*$/i, ''); state = 'top'; continue }
+    if (/^##\s+Purpose/i.test(trim)) { state = 'purpose'; continue }
+    if (/^##\s+Requirements/i.test(trim)) { state = 'top'; continue }
+    var mReq = trim.match(/^###\s+Requirement:\s*(.+)$/i)
+    if (mReq) {
+      currentReq = { name: mReq[1].trim(), description: '', scenarios: [] }
+      reqs.push(currentReq)
+      currentScn = null
+      state = 'reqDesc'
+      continue
+    }
+    var mScn = trim.match(/^####\s+Scenario:\s*(.+)$/i)
+    if (mScn) {
+      currentScn = { name: mScn[1].trim(), steps: [] }
+      if (currentReq) currentReq.scenarios.push(currentScn)
+      state = 'scenario'
+      continue
+    }
+    if (!trim) continue
+    if (state === 'purpose') {
+      purpose += (purpose ? '\n' : '') + trim
+    } else if (state === 'reqDesc') {
+      if (currentReq) currentReq.description += (currentReq.description ? '\n' : '') + trim
+    } else if (state === 'scenario' && currentScn) {
+      var step = trim.match(/^[-*]\s+\*\*(\w+)\*\*\s*(.+)$/)
+      if (step) currentScn.steps.push({ type: step[1].toUpperCase(), text: step[2].trim() })
+      else if (currentScn.steps.length) currentScn.steps[currentScn.steps.length - 1].text += ' ' + trim
+    }
+  }
+  return { title: title, purpose: purpose, requirements: reqs }
+}
+
+function filterSpecFiles(files, query) {
+  var q = String(query || '').trim().toLowerCase()
+  var list = files || []
+  if (!q) return list
+  return list.filter(function(f) {
+    return [f.title, f.path, f.domain, f.purpose, f.token].some(function(v) {
+      return String(v || '').toLowerCase().indexOf(q) >= 0
+    })
+  })
+}
+
+function specCountsLabel(file) {
+  if (!file || typeof file.requirementCount !== 'number') return ''
+  return file.requirementCount + ' reqs \u00b7 ' + (file.scenarioCount || 0) + ' scenarios'
+}
+
+function specStatusBadgeVisible(status) {
+  return status === 'added' || status === 'modified' || status === 'deleted'
+}
+
+function specRequirementText(req) {
+  var parts = [req.name, req.description]
+  var scenarios = req.scenarios || []
+  scenarios.forEach(function(scn) {
+    parts.push(scn.name)
+    ;(scn.steps || []).forEach(function(st) { parts.push(st.type, st.text) })
+  })
+  return parts.join('\n').toLowerCase()
+}
+
+// Keeps the original requirement index so R-numbers stay stable while filtering.
+function filterSpecRequirements(reqs, query) {
+  var q = String(query || '').trim().toLowerCase()
+  var out = []
+  var list = reqs || []
+  list.forEach(function(req, index) {
+    if (!q || specRequirementText(req).indexOf(q) >= 0) out.push({ index: index, req: req })
+  })
+  return out
+}
+
+function changeSlugFromScope(scope) {
+  var s = String(scope || '')
+  return s.indexOf('change:') === 0 ? s.slice('change:'.length) : ''
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Resolver-safe identity helpers — pure, testable, canonical-aligned
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1210,7 +1305,7 @@ function DetailDrawer({ title, secondary, itemRef, canCopy, token, taskStats, cr
 // Change detail drawer
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItems, ctx, width, onWidthChange, onSelectExploration, onClose }) {
+function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItems, ctx, width, onWidthChange, initialTab, onClose }) {
   var query = useQuery({
     queryKey: ['openspec', 'change', sourceId, change.name || change.token],
     queryFn: function() { return api.change(sourceId, change.name || change.token) },
@@ -1238,16 +1333,15 @@ function ChangeDetailDrawer({ api, sourceId, change, source, allSources, allItem
     reviews: function() { return { key: 'reviews', label: 'Reviews (' + data.reviews.length + ')', content: jsx(ReviewsView, { reviews: data.reviews }) } },
     explorations: function() {
       var pool = (source && source.openspec && source.openspec.explorations) || localExplorations
-      return { key: 'explorations', label: 'Explorations (' + localExplorations.length + ')', content: jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px' }, children: localExplorations.map(function(ex) {
-        return renderExplorationRow(ex, source, allSources, pool, onSelectExploration || function() {})
-      }) }) }
+      return { key: 'explorations', label: 'Explorations (' + localExplorations.length + ')', content: jsx(ChangeExplorationsView, { api: api, sourceId: sourceId, explorations: localExplorations, source: source, allSources: allSources, allItems: pool, ctx: ctx }) }
     },
   }
   var tabs = changeTabKeys(data).map(function(key) { return tabBuilders[key]() })
   var crewCards = crewCardsFor(data)
   if (crewCards.length === 0) crewCards = crewCardsFor(change)
 
-  var currentTab = activeTab || (tabs.length > 0 ? tabs[0].key : null)
+  var initialValid = initialTab && tabs.some(function(t) { return t.key === initialTab })
+  var currentTab = activeTab || (initialValid ? initialTab : null) || (tabs.length > 0 ? tabs[0].key : null)
 
   // Use detailTitle/detailSecondaryName fallback helpers for consistency.
   title = detailTitle(data, change, change, 'change')
@@ -1326,7 +1420,63 @@ function ExplorationsView({ source, sources, onSelectItem }) {
   ] })
 }
 
-function ExplorationBody({ api, sourceId, exploration, ctx }) {
+var SELECT_STYLE = { padding: '4px 8px', borderRadius: '4px', border: BORDER_SUBTLE, background: 'var(--ui-bg-quinary, transparent)', color: 'var(--foreground, inherit)', maxWidth: '100%' }
+
+// Scope badge; for change-scoped explorations with a navigation handler it becomes a clickable "Change: <slug>" link.
+function renderScopeBadge(scope, onOpenChange) {
+  var badge = jsx(Badge, { variant: 'outline', style: { fontSize: '10px' }, children: explorationScopeLabel(scope) })
+  var slug = changeSlugFromScope(scope)
+  if (!slug || typeof onOpenChange !== 'function') return badge
+  var open = function() { onOpenChange(slug) }
+  return jsx('span', {
+    role: 'button',
+    tabIndex: 0,
+    'data-change-link': slug,
+    title: 'Open change ' + slug,
+    onClick: open,
+    onKeyDown: function(e) { handleActivateKey(e, open) },
+    style: { cursor: 'pointer' },
+    children: badge
+  })
+}
+
+// Inline Explorations tab for ChangeDetailDrawer: dropdown when N > 1, direct selection when N === 1.
+function ChangeExplorationsView({ api, sourceId, explorations, source, allSources, allItems, ctx, defaultIndex }) {
+  var list = sortExplorations(explorations || [])
+  var [selectedIdx, setSelectedIdx] = React.useState(defaultIndex || 0)
+  if (list.length === 0) return jsx(EmptyState, { title: 'No explorations', description: 'This change has no explorations.' })
+  var idx = Math.min(Math.max(selectedIdx || 0, 0), list.length - 1)
+  var ex = list[idx]
+  var itemRef = buildItemReference(source, ex, allSources)
+  var canCopy = !!itemRef && hasUniqueItemToken(ex, allItems)
+  var pooled = (allItems || []).find(function(x) { return x && ex.token && x.token === ex.token })
+  var cards = crewCardsFor(ex)
+  if (cards.length === 0 && pooled) cards = crewCardsFor(pooled)
+  var key = ex.token || ex.name
+
+  return jsxs('div', { 'data-selectable-text': 'true', style: { padding: '12px', minWidth: 0 }, children: [
+    list.length > 1 ? jsx('div', { style: { marginBottom: '8px' }, children: jsx('select', {
+      'data-exploration-select': 'true',
+      value: idx,
+      onChange: function(e) { setSelectedIdx(parseInt(e.target.value, 10)) },
+      style: SELECT_STYLE,
+      children: list.map(function(x, i) { return jsx('option', { value: i, children: x.title || x.name || ('Exploration ' + (i + 1)) }, i) })
+    }) }) : null,
+    jsxs('div', { 'data-exploration-meta': 'true', style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', minWidth: 0, marginBottom: '8px' }, children: [
+      ex.date ? jsx('span', { style: { fontSize: '11px', color: 'var(--muted-foreground, #888)', whiteSpace: 'nowrap', flexShrink: 0 }, children: ex.date }) : null,
+      jsx(Badge, { variant: 'outline', title: explorationScopeLabel(ex.scope), style: { fontSize: '10px', maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }, children: explorationScopeLabel(ex.scope) }),
+      jsx('span', { style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--muted-foreground, #888)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }, children: ex.filename || '' }),
+      jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginLeft: 'auto', flexShrink: 0 }, children: [
+        canCopy ? jsx(CopyButton, { appearance: 'icon', text: itemRef, label: 'Copy item reference', title: itemRef }) : null,
+        ex.token ? jsx('span', { style: { fontFamily: 'monospace', fontSize: '10px', color: 'var(--muted-foreground, #888)' }, children: ex.token }) : null,
+      ] }),
+    ] }),
+    jsx(CrewCardChips, { cards: cards, ctx: ctx }),
+    jsx(ExplorationBody, { api: api, sourceId: sourceId, exploration: ex, ctx: ctx, inline: true }, key),
+  ] })
+}
+
+function ExplorationBody({ api, sourceId, exploration, ctx, inline, onOpenChange }) {
   var query = useQuery({
     queryKey: ['openspec', 'exploration', sourceId, exploration.scope || 'workspace', exploration.name],
     queryFn: function() { return api.exploration(sourceId, exploration.name, exploration.scope) }
@@ -1341,9 +1491,12 @@ function ExplorationBody({ api, sourceId, exploration, ctx }) {
   var cards = crewCardsFor(data)
   if (cards.length === 0) cards = crewCardsFor(exploration)
 
+  // Inline in the change drawer: ChangeExplorationsView already renders the metadata row and Crew chips.
+  if (inline) return jsx(MarkdownView, { content: stripFrontmatter(data.content || '') })
+
   return jsxs('div', { children: [
     jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 12px', flexWrap: 'wrap' }, children: [
-      jsx(Badge, { variant: 'outline', style: { fontSize: '10px' }, children: explorationScopeLabel(scope) }),
+      renderScopeBadge(scope, onOpenChange),
       date ? jsx('span', { style: { fontSize: '12px', color: 'var(--muted-foreground, #888)' }, children: date }) : null,
       path ? jsx(CopyButton, { appearance: 'icon', text: path, label: 'Copy file path', title: path }) : null,
     ] }),
@@ -1352,9 +1505,11 @@ function ExplorationBody({ api, sourceId, exploration, ctx }) {
   ] })
 }
 
-function ExplorationDetailDrawer({ api, sourceId, exploration, source, allSources, allItems, ctx, width, onWidthChange, onClose }) {
+function ExplorationDetailDrawer({ api, sourceId, exploration, source, allSources, allItems, ctx, width, onWidthChange, onBackToChange, onClose }) {
   var itemRef = buildItemReference(source, exploration, allSources)
   var canCopy = !!itemRef && hasUniqueItemToken(exploration, allItems)
+  var changeSlug = changeSlugFromScope(exploration.scope)
+  var canGoBack = !!changeSlug && typeof onBackToChange === 'function'
   return jsx(DetailDrawer, { width: width, onWidthChange: onWidthChange,
     title: exploration.title || exploration.name || 'Untitled exploration',
     secondary: exploration.filename || '',
@@ -1362,35 +1517,45 @@ function ExplorationDetailDrawer({ api, sourceId, exploration, source, allSource
     canCopy: canCopy,
     token: exploration.token || exploration.name || '',
     onClose: onClose,
-    children: jsx(ExplorationBody, { api: api, sourceId: sourceId, exploration: exploration, ctx: ctx })
+    children: jsxs('div', { children: [
+      canGoBack ? jsx('button', {
+        type: 'button',
+        'data-back-to-change': changeSlug,
+        onClick: function() { onBackToChange(changeSlug) },
+        style: { background: 'none', border: 'none', padding: '4px 12px', cursor: 'pointer', fontSize: '12px', color: semanticText(TOKEN_ACCENT) },
+        children: '\u2190 Back to ' + changeSlug
+      }) : null,
+      jsx(ExplorationBody, { api: api, sourceId: sourceId, exploration: exploration, ctx: ctx, onOpenChange: canGoBack ? onBackToChange : undefined }),
+    ] })
   })
+}
+
+function reviewOptionLabel(review) {
+  return '[' + (review.verdict || 'PENDING') + '] ' + review.name + (review.round != null ? ' \u00b7 Round ' + review.round : '')
 }
 
 function ReviewsView({ reviews }) {
   var list = Array.isArray(reviews) ? reviews : []
   var [selected, setSelected] = React.useState(list.length - 1)
   if (list.length === 0) return jsx(EmptyState, { title: 'No reviews', description: 'This change has no review findings.' })
-  var current = list[selected] || list[list.length - 1]
+  var idx = Math.min(Math.max(selected, 0), list.length - 1)
+  var current = list[idx]
 
-  return jsxs('div', { 'data-selectable-text': 'true', style: { padding: '12px' }, children: [
-    jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '12px' }, children: list.map(function(review, i) {
-      var active = review === current
-      return jsxs('button', {
-        type: 'button',
-        'data-review-item': review.token || review.name,
-        onClick: function() { setSelected(i) },
-        className: cn(
-          'flex items-center gap-2 rounded-md border px-2 py-1 text-left cursor-pointer bg-transparent',
-          active ? 'border-(--ui-focus-border)' : 'border-(--ui-stroke-tertiary)'
-        ),
-        children: [
-          jsx(Badge, { variant: 'outline', style: { fontSize: '10px', color: verdictTone(review.verdict) }, children: review.verdict || 'PENDING' }),
-          jsx('span', { style: { fontSize: '12px', color: 'var(--foreground, inherit)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }, children: review.name }),
-          review.round != null ? jsx('span', { style: { fontSize: '11px', color: 'var(--muted-foreground, #888)' }, children: 'Round ' + review.round }) : null,
-        ]
-      }, review.token || review.name)
-    }) }),
-    jsx('div', { style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--muted-foreground, #888)', marginBottom: '4px' }, children: current.filename || '' }),
+  return jsxs('div', { 'data-selectable-text': 'true', style: { padding: '12px', minWidth: 0 }, children: [
+    list.length > 1 ? jsx('div', { style: { marginBottom: '8px' }, children: jsx('select', {
+      'data-review-select': 'true',
+      value: idx,
+      onChange: function(e) { setSelected(parseInt(e.target.value, 10)) },
+      style: SELECT_STYLE,
+      children: list.map(function(review, i) {
+        return jsx('option', { value: i, 'data-review-item': review.token || review.name, children: reviewOptionLabel(review) }, review.token || review.name)
+      })
+    }) }) : null,
+    jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', minWidth: 0, marginBottom: '8px' }, children: [
+      jsx(Badge, { variant: 'outline', style: { fontSize: '10px', color: verdictTone(current.verdict) }, children: current.verdict || 'PENDING' }),
+      jsx('span', { style: { fontFamily: 'monospace', fontSize: '11px', color: 'var(--muted-foreground, #888)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }, children: current.filename || '' }),
+      current.round != null ? jsx('span', { style: { fontSize: '11px', color: 'var(--muted-foreground, #888)' }, children: 'Round ' + current.round }) : null,
+    ] }),
     jsx(MarkdownView, { content: stripFrontmatter(current.content || '') }),
   ] })
 }
@@ -1594,7 +1759,75 @@ function SpecsDetailView({ specs }) {
     spec.path ? jsx('div', { style: { fontSize: '12px', color: 'var(--muted-foreground, #888)', marginBottom: '8px', fontFamily: 'monospace' }, children: spec.path }) : null,
     spec.status ? jsx(Badge, { variant: 'outline', style: { marginBottom: '8px' }, children: spec.status }) : null,
     jsx(DiffModePanel, { data: spec }),
-    spec.content ? jsx(MarkdownView, { content: stripFrontmatter(spec.content) }) : null,
+    spec.content ? jsx(StructuredSpecView, { content: spec.content }, spec.path || selectedIdx) : null,
+  ] })
+}
+
+// Highlights RFC 2119 keywords inside a requirement or scenario sentence.
+var SPEC_KEYWORD_RE = /\b(SHALL NOT|MUST NOT|SHOULD NOT|SHALL|MUST|SHOULD)\b/g
+
+function renderSpecKeywords(text) {
+  var parts = []
+  var src = String(text || '')
+  var last = 0
+  var m
+  SPEC_KEYWORD_RE.lastIndex = 0
+  while ((m = SPEC_KEYWORD_RE.exec(src)) !== null) {
+    if (m.index > last) parts.push(src.slice(last, m.index))
+    parts.push(jsx('strong', { 'data-spec-keyword': m[1], style: { fontWeight: 700, color: semanticText(m[1].indexOf('NOT') >= 0 ? TOKEN_DANGER : TOKEN_ACCENT) }, children: m[1] }, 'kw' + m.index))
+    last = m.index + m[0].length
+  }
+  if (last < src.length) parts.push(src.slice(last))
+  return parts
+}
+
+var STEP_TONES = { WHEN: TOKEN_ACCENT, THEN: TOKEN_SUCCESS, AND: 'var(--muted-foreground, #888)', GIVEN: TOKEN_WARNING }
+
+// Shared by SpecsView and the change drawer Specs tab: Purpose callout, R1..Rn requirement cards, WHEN/THEN/AND steps.
+function StructuredSpecView({ content, defaultMode, defaultFilter }) {
+  var [mode, setMode] = React.useState(defaultMode || 'structured')
+  var [filter, setFilter] = React.useState(defaultFilter || '')
+  var md = stripFrontmatter(content || '') || ''
+  var parsed = parseSpec(md)
+  if (parsed.requirements.length === 0) return jsx(MarkdownView, { content: md })
+
+  var visible = filterSpecRequirements(parsed.requirements, filter)
+  var toggle = jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap', marginBottom: '8px' }, children: [
+    jsx(Button, { variant: mode === 'structured' ? 'default' : 'outline', size: 'sm', 'data-spec-mode': 'structured', onClick: function() { setMode('structured') }, children: 'Structured' }),
+    jsx(Button, { variant: mode === 'raw' ? 'default' : 'outline', size: 'sm', 'data-spec-mode': 'raw', onClick: function() { setMode('raw') }, children: 'Raw' }),
+    mode === 'structured' ? jsx(Input, { placeholder: 'Filter requirements...', value: filter, onChange: function(e) { setFilter(e.target.value) }, style: { flex: 1, minWidth: '140px' } }) : null,
+  ] })
+  if (mode === 'raw') return jsxs('div', { children: [toggle, jsx(MarkdownView, { content: md })] })
+
+  return jsxs('div', { 'data-structured-spec': 'true', style: { minWidth: 0 }, children: [
+    toggle,
+    parsed.purpose ? jsxs('div', { 'data-spec-purpose': 'true', style: { borderLeft: '3px solid ' + semanticTint(TOKEN_ACCENT, 70), background: semanticTint(TOKEN_ACCENT, 8), borderRadius: '0 4px 4px 0', padding: '6px 12px', marginBottom: '10px' }, children: [
+      jsx('div', { style: { fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted-foreground, #888)', marginBottom: '2px' }, children: 'Purpose' }),
+      jsx('div', { style: { fontSize: '13px', lineHeight: 1.5, whiteSpace: 'pre-wrap', color: 'var(--foreground, inherit)' }, children: parsed.purpose }),
+    ] }) : null,
+    visible.length === 0 ? jsx('div', { style: { fontSize: '12px', color: 'var(--muted-foreground, #888)', padding: '8px 0' }, children: 'No requirements match the filter.' }) : null,
+    visible.map(function(entry) {
+      var req = entry.req
+      var num = 'R' + (entry.index + 1)
+      return jsxs('div', { 'data-spec-req': num, style: { border: BORDER_SUBTLE, borderRadius: '6px', marginBottom: '10px', overflow: 'hidden' }, children: [
+        jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', background: SURFACE_CODE }, children: [
+          jsx('span', { style: { fontFamily: 'monospace', fontSize: '11px', fontWeight: 700, color: semanticText(TOKEN_ACCENT), background: semanticTint(TOKEN_ACCENT, 14), borderRadius: '3px', padding: '1px 5px' }, children: num }),
+          jsx('span', { style: { fontSize: '13px', fontWeight: 600, minWidth: 0, wordBreak: 'break-word', color: 'var(--foreground, inherit)' }, children: req.name }),
+        ] }),
+        req.description ? jsx('div', { style: { padding: '6px 10px', fontSize: '12px', lineHeight: 1.5, whiteSpace: 'pre-wrap', color: 'var(--foreground, inherit)' }, children: renderSpecKeywords(req.description) }) : null,
+        (req.scenarios || []).map(function(scn, si) {
+          return jsxs('div', { style: { margin: '0 10px 8px', padding: '6px 8px', borderLeft: '2px solid ' + semanticTint(TOKEN_ACCENT, 50), background: SURFACE_CODE, borderRadius: '0 4px 4px 0' }, children: [
+            jsx('div', { style: { fontSize: '12px', fontWeight: 600, marginBottom: '4px', color: 'var(--foreground, inherit)' }, children: scn.name }),
+            (scn.steps || []).map(function(st, ti) {
+              return jsxs('div', { 'data-spec-step': st.type, style: { display: 'flex', alignItems: 'flex-start', gap: '6px', padding: '1px 0', fontSize: '12px', lineHeight: 1.4 }, children: [
+                jsx('span', { style: { flexShrink: 0, minWidth: '40px', textAlign: 'right', fontFamily: 'monospace', fontSize: '10px', fontWeight: 700, color: semanticText(STEP_TONES[st.type] || STEP_TONES.AND) }, children: st.type }),
+                jsx('span', { style: { flex: 1, minWidth: 0, wordBreak: 'break-word', color: 'var(--foreground, inherit)' }, children: renderSpecKeywords(st.text) }),
+              ] }, ti)
+            }),
+          ] }, si)
+        }),
+      ] }, num)
+    }),
   ] })
 }
 
@@ -1742,6 +1975,7 @@ function WorkView({ api, source, sources, onSelectItem, showArchived, onToggleAr
 function SpecsView({ api, sourceId, ctx }) {
   var [worktree, setWorktree] = React.useState(false)
   var [sidebarWidth, setSidebarWidth] = React.useState(readStoredWidth(ctx, 'specsSidebarWidth', clampSpecsSidebarWidth))
+  var [specFilter, setSpecFilter] = React.useState('')
 
   var query = useQuery({
     queryKey: ['openspec', 'spec-browser', sourceId, worktree],
@@ -1763,6 +1997,7 @@ function SpecsView({ api, sourceId, ctx }) {
   })
 
   var files = (query.data && query.data.files) || []
+  var visibleFiles = filterSpecFiles(files, specFilter)
   var branch = query.data && query.data.branch
   var changedCount = query.data && query.data.changedCount != null ? query.data.changedCount : files.length
 
@@ -1781,18 +2016,33 @@ function SpecsView({ api, sourceId, ctx }) {
     }) : null,
     !query.isLoading && files.length > 0 ? jsxs('div', { style: { display: 'flex', gap: '12px', flex: 1, overflow: 'hidden' }, children: [
       jsxs('div', { 'data-specs-sidebar': 'true', style: { width: sidebarWidth + 'px', flexShrink: 0, overflow: 'auto' }, children: [
-        files.map(function(file) {
+        jsx(Input, { 'data-specs-filter': 'true', placeholder: 'Filter specs...', value: specFilter, onChange: function(e) { setSpecFilter(e.target.value) }, style: { width: '100%', marginBottom: '6px' } }),
+        visibleFiles.length === 0 ? jsx('div', { style: { fontSize: '12px', color: 'var(--muted-foreground, #888)', padding: '8px 12px' }, children: 'No specs match the filter.' }) : null,
+        visibleFiles.map(function(file) {
           var path = file.path || file.name || file
           var isSelected = selectedFile === path
+          var purposeLine = String(file.purpose || '').split('\n')[0]
+          var counts = specCountsLabel(file)
+          var showTitle = file.title && file.title !== path
           return jsxs('div', {
+            'data-spec-card': path,
             className: cn(
               'px-3 py-2 cursor-pointer text-sm rounded-md',
               isSelected ? 'bg-(--ui-control-active-background) text-foreground font-medium' : 'text-muted-foreground hover:bg-(--ui-control-hover-background) hover:text-foreground'
             ),
+            style: { minWidth: 0 },
+            role: 'button',
+            tabIndex: 0,
             onClick: function() { setSelectedFile(path) },
+            onKeyDown: function(e) { handleActivateKey(e, function() { setSelectedFile(path) }) },
             children: [
-              jsx('div', { style: { fontFamily: 'monospace', fontSize: '12px' }, children: path }),
-              file.status ? jsx(Badge, { variant: 'outline', style: { fontSize: '10px', marginTop: '2px' }, children: file.status }) : null,
+              jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }, children: [
+                jsx('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600, fontSize: '13px', color: 'var(--foreground, inherit)' }, title: showTitle ? file.title : path, children: showTitle ? file.title : path }),
+                specStatusBadgeVisible(file.status) ? jsx(Badge, { variant: 'outline', style: { fontSize: '10px', flexShrink: 0 }, children: file.status }) : null,
+              ] }),
+              showTitle ? jsx('div', { style: { fontFamily: 'monospace', fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: path, children: path }) : null,
+              purposeLine ? jsx('div', { 'data-spec-card-purpose': 'true', title: purposeLine, style: { fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '2px' }, children: purposeLine }) : null,
+              counts ? jsx('div', { 'data-spec-card-counts': 'true', style: { fontFamily: 'monospace', fontSize: '10px', marginTop: '2px', opacity: 0.8 }, children: counts }) : null,
             ]
           }, path)
         }),
@@ -1826,7 +2076,7 @@ function SpecsView({ api, sourceId, ctx }) {
         worktree && selectedFile ? jsx(WorktreeDetailView, { sourceId: sourceId, file: selectedFile, files: files }) : null,
         !worktree && selectedFile && specQuery.isLoading ? jsx(Loader, { type: 'lemniscate-bloom' }) : null,
         !worktree && selectedFile && specQuery.error ? jsx(RetryErrorState, { title: 'Failed to load spec', description: specQuery.error.message, onRetry: function() { specQuery.refetch() } }) : null,
-        !worktree && selectedFile && !specQuery.isLoading && !specQuery.error ? jsx(MarkdownView, { content: stripFrontmatter(specQuery.data && specQuery.data.content) }) : null,
+        !worktree && selectedFile && !specQuery.isLoading && !specQuery.error ? jsx(StructuredSpecView, { content: specQuery.data && specQuery.data.content }, selectedFile) : null,
         !selectedFile ? jsx(EmptyState, { title: 'Select a file', description: 'Choose a spec file from the list to view its content.' }) : null,
       ] }),
     ] }) : null,
@@ -1879,6 +2129,14 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
     var hash = String((window.location && window.location.hash) || '')
     if (hash.indexOf('#/openspec') === 0) navigateToCrewCard(ctx, '/openspec')
   }, [])
+
+  // Back from an exploration drawer to its owning change drawer, landing on the Explorations tab.
+  function handleBackToChange(slug) {
+    var changes = (selectedSource && selectedSource.openspec && selectedSource.openspec.changes) || []
+    var found = changes.find(function(c) { return c.name === slug || c.token === slug })
+    var item = Object.assign({}, found || { name: slug, title: slug }, { _type: 'change' })
+    setSelectedItem({ item: item, sourceId: selectedSourceId, type: 'change', initialTab: 'explorations' })
+  }
 
   function handleDrawerWidth(w, commit) {
     setDrawerWidth(w)
@@ -2068,8 +2326,8 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
     }) }),
 
     // Detail drawer — synchronous gate: reject stale item from different source
-    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'change' && selectedSource && selectedSource.valid !== false ? jsx(ChangeDetailDrawer, { api: api, sourceId: selectedSourceId, change: selectedItem.item, source: selectedSource, allSources: sources, allItems: allItems, ctx: ctx, width: drawerWidth, onWidthChange: handleDrawerWidth, onSelectExploration: onSelectItem, onClose: function() { setSelectedItem(null) } }) : null,
-    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'exploration' && selectedSource && selectedSource.valid !== false ? jsx(ExplorationDetailDrawer, { api: api, sourceId: selectedSourceId, exploration: selectedItem.item, source: selectedSource, allSources: sources, allItems: (selectedSource.openspec && selectedSource.openspec.explorations) || [], ctx: ctx, width: drawerWidth, onWidthChange: handleDrawerWidth, onClose: function() { setSelectedItem(null) } }) : null,
+    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'change' && selectedSource && selectedSource.valid !== false ? jsx(ChangeDetailDrawer, { api: api, sourceId: selectedSourceId, change: selectedItem.item, source: selectedSource, allSources: sources, allItems: allItems, ctx: ctx, width: drawerWidth, onWidthChange: handleDrawerWidth, initialTab: selectedItem.initialTab, onClose: function() { setSelectedItem(null) } }, 'change:' + (selectedItem.item.name || selectedItem.item.token)) : null,
+    selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'exploration' && selectedSource && selectedSource.valid !== false ? jsx(ExplorationDetailDrawer, { api: api, sourceId: selectedSourceId, exploration: selectedItem.item, source: selectedSource, allSources: sources, allItems: (selectedSource.openspec && selectedSource.openspec.explorations) || [], ctx: ctx, width: drawerWidth, onWidthChange: handleDrawerWidth, onBackToChange: handleBackToChange, onClose: function() { setSelectedItem(null) } }) : null,
     selectedItem && selectedItem.sourceId === selectedSourceId && selectedItem.type === 'idea' && selectedSource && selectedSource.valid !== false ? jsx(IdeaDetailDrawer, { api: api, sourceId: selectedSourceId, idea: selectedItem.item, source: selectedSource, allSources: sources, allItems: allItems, width: drawerWidth, onWidthChange: handleDrawerWidth, onClose: function() { setSelectedItem(null) } }) : null,
 
     // Source add/edit dialog
@@ -2207,4 +2465,13 @@ export const __test = Object.freeze({
   sourceNeedsInitialization: sourceNeedsInitialization,
   initializeAddedSource: initializeAddedSource,
   createApi: createApi,
+  parseSpec: parseSpec,
+  filterSpecFiles: filterSpecFiles,
+  filterSpecRequirements: filterSpecRequirements,
+  specCountsLabel: specCountsLabel,
+  specStatusBadgeVisible: specStatusBadgeVisible,
+  StructuredSpecView: StructuredSpecView,
+  ChangeExplorationsView: ChangeExplorationsView,
+  SpecsDetailView: SpecsDetailView,
+  MarkdownView: MarkdownView,
 })

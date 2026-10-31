@@ -2537,9 +2537,9 @@ console.log('  Change reviews')
 {
   const r = s2.reviews || {}
   check(!r.__error, 'ReviewsView renders', r.__error)
-  check(Array.isArray(r.badgeTexts) && r.badgeTexts.indexOf('REJECTED') >= 0 && r.badgeTexts.indexOf('APPROVED') >= 0, 'ReviewsView shows a verdict badge per review', JSON.stringify(r.badgeTexts))
+  check(Array.isArray(r.badgeTexts) && r.badgeTexts.indexOf('APPROVED') >= 0 && (r.optionTexts || []).some(o => o.indexOf('REJECTED') >= 0) && (r.optionTexts || []).some(o => o.indexOf('APPROVED') >= 0), 'ReviewsView shows the selected verdict badge and lists every verdict in the dropdown', JSON.stringify([r.badgeTexts, r.optionTexts]))
   check(r.mentionsRound === true, 'ReviewsView shows the round', JSON.stringify(r.mentionsRound))
-  check(r.listButtons === 2, 'ReviewsView lists each review', JSON.stringify(r.listButtons))
+  check(r.listButtons === 2, 'ReviewsView lists each review as a dropdown option', JSON.stringify(r.listButtons))
   check(s2.reviewsEmpty === 1, 'ReviewsView empty -> EmptyState', JSON.stringify(s2.reviewsEmpty))
   const ct = s2.changeTabs || {}
   check(!ct.__error, 'ChangeDetailDrawer renders with reviews/explorations', ct.__error)
@@ -2608,7 +2608,7 @@ check(!web.__driverError, 'Web dashboard driver executes the shipped IIFE', web.
   check(f[0] && f[0].url === '/api/plugins/openspec/sources/src%201/explorations/spike?scope=change%3Ademo' && !f[0].method, 'web exploration GET path', JSON.stringify(f[0]))
   check(f[1] && f[1].url === '/api/plugins/openspec/sources/src%201/discover' && f[1].method === 'POST' && JSON.parse(f[1].body).register === true, 'web discover POST body', JSON.stringify(f[1]))
   const r = web.reviews || {}
-  check(Array.isArray(r.badges) && r.badges.indexOf('REJECTED') >= 0 && r.badges.indexOf('APPROVED') >= 0 && r.round === true && r.buttons === 2, 'web ReviewsTab lists verdict badges and rounds', JSON.stringify(r))
+  check(Array.isArray(r.badges) && r.badges.indexOf('APPROVED') >= 0 && r.round === true && r.options === 2 && (r.optionTexts || []).some(o => o.indexOf('REJECTED') >= 0), 'web ReviewsTab shows the selected verdict badge, round and a dropdown of every review', JSON.stringify(r))
   check(String(web.reviewsEmpty).indexOf('No reviews') >= 0, 'web ReviewsTab empty state', JSON.stringify(web.reviewsEmpty))
   const c = web.crew || {}
   check(JSON.stringify(c.hrefs) === '["/crew?card=t_aaa111"]' && String((c.text || [])[0]).indexOf('t_aaa111 running') >= 0, 'web CrewCards link to /crew?card=<id>', JSON.stringify(c))
@@ -2700,6 +2700,76 @@ console.log('\n[Slice 3] Live Crew promotion, radar scanning, resizable drawers,
   check(/<blockquote class="os-quote">quote line<\/blockquote>/.test(w3b) && /<hr class="os-hr"\/>/.test(w3b), 'Web markdown renders blockquote and hr', w3b)
   check(/<em>it<\/em>/.test(w3b) && /<em>un<\/em>/.test(w3b) && /<strong>b<\/strong>/.test(w3b) && /href="https:\/\/example\.com"/.test(w3b) && !/href="javascript:/.test(w3b) && w3b.includes('[unsafe link]'), 'Web inline: italic, bold, safe link; javascript: link neutralised', w3b)
   check(webCss.includes('.os-md .os-table') && webCss.includes('.os-md .os-quote') && webCss.includes('.os-md h1 {') && webCss.includes('--ui-success'), 'dashboard/dist/style.css styles table, blockquote, H1-H4 and semantic delta tokens')
+
+  // ── Slice 3c: inline Explorations/Reviews viewers, back-to-change, rich Specs + StructuredSpecView ──
+  console.log('\n[Slice 3c] Inline Explorations/Reviews viewer, back-to-change navigation, rich SpecsView & StructuredSpecView')
+  const c3 = (s2 && s2.slice3c) || {}
+  check(!c3.__error, 'Slice 3c UI probe ran cleanly', c3.__error)
+  const ce = c3.ce || {}
+  check(ce.selectCount === 1 && ce.options === 2 && ce.selectedValue === 0, 'ChangeExplorationsView shows a <select> dropdown with one option per exploration when N > 1', JSON.stringify([ce.selectCount, ce.options, ce.selectedValue]))
+  check((ce.optionText || []).some(x => x.includes('New Topic')) && (ce.optionText || []).some(x => x.includes('Spike Notes')), 'Exploration dropdown options are labelled by title', JSON.stringify(ce.optionText))
+  check(ce.bodyInline === true && ce.bodyName === 'new', 'Selected exploration renders ExplorationBody inline (newest first)', JSON.stringify([ce.bodyInline, ce.bodyName]))
+  check(ce.secondBodyName !== undefined && ce.secondBodyName !== ce.bodyName, 'defaultIndex selects another exploration body', JSON.stringify([ce.bodyName, ce.secondBodyName]))
+  check(String(ce.metaText).includes('2026-10-30') && String(ce.metaText).includes('Change: demo') && String(ce.metaText).includes('new.md') && String(ce.metaText).includes('os_000002'), 'Exploration metadata shows date, scope badge, filename and token', JSON.stringify(ce.metaText))
+  check((ce.copyRefs || []).includes('demoapp/os_000002'), 'Exploration metadata offers CopyButton for <source>/<token>', JSON.stringify(ce.copyRefs))
+  check(JSON.stringify(ce.chipCards) === '["t_pool01"]', 'ChangeExplorationsView renders CrewCardChips from the pooled source exploration', JSON.stringify(ce.chipCards))
+  check(ce.oneSelectCount === 0 && ce.oneBodyName === 'new' && ce.oneChipsRendered === true, 'Single exploration is selected directly without a dropdown', JSON.stringify([ce.oneSelectCount, ce.oneBodyName, ce.oneChipsRendered]))
+  const cd3 = c3.cdd || {}
+  check(cd3.hasView === true && cd3.viewCount === 2 && cd3.legacyRows === 0, 'ChangeDetailDrawer Explorations tab renders ChangeExplorationsView inline (no row list)', JSON.stringify(cd3))
+  check(cd3.hasSpecsView === true && cd3.specsStructured === 1, 'ChangeDetailDrawer Specs tab renders StructuredSpecView via SpecsDetailView', JSON.stringify(cd3))
+  const rv3 = c3.rv || {}
+  check(rv3.selectCount === 1 && (rv3.options || []).length === 2 && rv3.value === 1 && rv3.mentionsV2 === true, 'ReviewsView shows a <select> dropdown when N > 1 with the latest review selected', JSON.stringify(rv3))
+  check((rv3.options || []).every(o => /REJECTED|APPROVED/.test(o)) && rv3.oneSelectCount === 0 && (rv3.oneBadges || []).includes('APPROVED'), 'ReviewsView options carry verdicts; single review has no dropdown but keeps its verdict badge', JSON.stringify([rv3.options, rv3.oneSelectCount, rv3.oneBadges]))
+  const bk = c3.back || {}
+  check(bk.text === '\u2190 Back to demo' && JSON.stringify((bk.calls || []).slice(0, 1)) === '["demo"]', 'ExplorationDetailDrawer renders a clickable "\u2190 Back to demo" button that navigates to the change', JSON.stringify(bk))
+  check(bk.noHandlerBtn === 0 && bk.workspaceBtn === 0, 'Back button only appears for change-scoped explorations with a navigation handler', JSON.stringify([bk.noHandlerBtn, bk.workspaceBtn]))
+  check(bk.badgeRole === 'button' && String(bk.badgeText).includes('Change: demo') && JSON.stringify((bk.calls || []).slice(1)) === '["badge:demo","badge:demo"]', 'ExplorationBody "Change: <slug>" badge is clickable (click + Enter) and opens the change', JSON.stringify(bk))
+
+  const pf = c3.parsed || {}
+  check(pf.title === 'Compose' && String(pf.purpose).includes('Define how compose stacks start.') && (pf.reqs || []).length === 2 && JSON.stringify(pf.reqs.map(r => r.steps)) === '[[["WHEN","THEN"]],[["WHEN","THEN","AND"]]]', 'Desktop parseSpec mirrors spec_parser (title, purpose, requirements, WHEN/THEN/AND)', JSON.stringify(pf))
+  check(c3.filterAll === 3 && JSON.stringify(c3.filterTitle) === '["agents/spec.md"]' && JSON.stringify(c3.filterPath) === '["compose/spec.md"]' && JSON.stringify(c3.filterDomain) === '["agents/spec.md"]' && JSON.stringify(c3.filterPurpose) === '["agents/spec.md"]' && JSON.stringify(c3.filterToken) === '["bare.md"]' && c3.filterNone === 0, 'filterSpecFiles matches title, path, domain, purpose and token (case-insensitive)', JSON.stringify([c3.filterTitle, c3.filterPath, c3.filterDomain, c3.filterPurpose, c3.filterToken, c3.filterNone]))
+  check(JSON.stringify(c3.countsLabel) === '["2 reqs \u00b7 3 scenarios",""]', 'specCountsLabel renders "N reqs \u00b7 M scenarios" and is empty without counts', JSON.stringify(c3.countsLabel))
+  check(JSON.stringify(c3.reqFilter) === '["R2"]', 'filterSpecRequirements keeps original R-numbers when filtering by step text', JSON.stringify(c3.reqFilter))
+  check(JSON.stringify(c3.statusBadges) === '[false,false,false,true,true,true,false]', 'Redundant current/unchanged/missing badges are suppressed; added/modified/deleted kept', JSON.stringify(c3.statusBadges))
+  const sv3 = c3.sv || {}
+  check(JSON.stringify(sv3.reqNums) === '["R1","R2"]' && sv3.noFrontmatter === true, 'StructuredSpecView renders R1..Rn requirement cards and strips frontmatter', JSON.stringify([sv3.reqNums, sv3.noFrontmatter]))
+  check(String(sv3.purpose).includes('Define how compose stacks start.'), 'StructuredSpecView renders the Purpose callout', JSON.stringify(sv3.purpose))
+  check(JSON.stringify(sv3.stepTypes) === '["WHEN","THEN","WHEN","THEN","AND"]', 'StructuredSpecView renders WHEN/THEN/AND scenario step badges', JSON.stringify(sv3.stepTypes))
+  check(JSON.stringify(sv3.keywords) === '["SHALL","MUST NOT","MUST"]', 'StructuredSpecView highlights SHALL/MUST keywords', JSON.stringify(sv3.keywords))
+  check(JSON.stringify(sv3.toggles) === '["structured:Structured","raw:Raw"]' && sv3.inputs === 1, 'StructuredSpecView has a Structured | Raw toggle and a requirement filter input', JSON.stringify([sv3.toggles, sv3.inputs]))
+  check(JSON.stringify((c3.svFiltered || {}).reqNums) === '["R2"]', 'StructuredSpecView requirement filter narrows to matching requirements', JSON.stringify(c3.svFiltered))
+  check((c3.svRaw || {}).structured === 0 && (c3.svRaw || {}).markdown === 1 && (c3.svRaw || {}).toggles === 2, 'Raw mode shows the Markdown rendering instead of requirement cards', JSON.stringify(c3.svRaw))
+  check((c3.svPlain || {}).structured === 0 && (c3.svPlain || {}).markdown === 1, 'Specs without requirements fall back to Markdown', JSON.stringify(c3.svPlain))
+  const cards3 = c3.cards || []
+  check(cards3.length === 3 && c3.filterInput === true, 'SpecsView renders a filter input and one rich card per spec file', JSON.stringify([cards3.length, c3.filterInput]))
+  const compose = cards3.find(c => c.path === 'compose/spec.md') || {}
+  check(String(compose.text).includes('Compose') && String(compose.text).includes('compose/spec.md') && String(compose.text).includes('Define how compose stacks start.') && JSON.stringify(compose.counts) === '["2 reqs \u00b7 3 scenarios"]', 'Spec card shows title, path/domain, purpose preview and "N reqs \u00b7 M scenarios"', JSON.stringify(compose))
+  check(JSON.stringify((compose.purpose || []).map(p => p.text)) === '["Define how compose stacks start."]', 'Spec card purpose preview is the first purpose line only', JSON.stringify(compose.purpose))
+  check(JSON.stringify(compose.badges) === '[]', 'Spec card suppresses the redundant "current" status badge', JSON.stringify(compose.badges))
+  const agents = cards3.find(c => c.path === 'agents/spec.md') || {}
+  const bare = cards3.find(c => c.path === 'bare.md') || {}
+  check(JSON.stringify(agents.badges) === '["modified"]' && JSON.stringify(bare.badges) === '["added"]', 'Spec card keeps added/modified/deleted diff badges', JSON.stringify([agents.badges, bare.badges]))
+  check((bare.counts || []).length === 0 && (bare.purpose || []).length === 0, 'Spec card omits counts and purpose lines when the backend has none', JSON.stringify(bare))
+
+  // Web surface
+  const w3c = (web && web.slice3c) || {}
+  check(w3c.filterAll === 2 && JSON.stringify(w3c.filterPath) === '["compose/spec.md"]' && JSON.stringify(w3c.filterPurpose) === '["agents/spec.md"]' && JSON.stringify(w3c.filterToken) === '["agents/spec.md"]' && w3c.filterNone === 0 && w3c.counts === '2 reqs \u00b7 3 scenarios', 'Web filterSpecFiles/specCountsLabel mirror the Desktop semantics', JSON.stringify(w3c))
+  const wce = w3c.ce || {}
+  check(wce.selects === 1 && JSON.stringify(wce.options) === '["Alpha Note","Beta Note"]' && wce.body === 1 && wce.oneSelects === 0 && wce.oneBody === 1, 'Web Explorations tab renders a dropdown (N > 1) and the exploration inline', JSON.stringify(wce))
+  const wbk = w3c.back || {}
+  check(wbk.text === '\u2190 Back to demo' && JSON.stringify((wbk.calls || []).slice(0, 2)) === '["demo","demo"]' && wbk.wsButtons === 0, 'Web ExplorationDialog has a clickable "\u2190 Back to demo" button and Change badge', JSON.stringify(wbk))
+  const wrv = w3c.rv || {}
+  check(wrv.selects === 1 && (wrv.options || []).length === 2 && wrv.oneSelects === 0, 'Web ReviewsTab shows a dropdown when N > 1', JSON.stringify(wrv))
+  const wsv = w3c.sv || {}
+  check(wsv.reqs === 2 && JSON.stringify(wsv.reqNums) === '["R1","R2"]' && wsv.purpose === 1 && JSON.stringify(wsv.steps) === '["WHEN","THEN","WHEN","THEN","AND"]' && JSON.stringify(wsv.keywords) === '["SHALL","MUST NOT","MUST"]' && JSON.stringify(wsv.toggles) === '["Structured","Raw"]' && wsv.filterInputs === 1, 'Web StructuredSpecView mirrors Desktop (R-cards, Purpose, steps, keywords, toggle, filter)', JSON.stringify(wsv))
+  check(JSON.stringify((w3c.svFilt || {}).reqNums) === '["R2"]' && (w3c.svRaw || {}).reqs === 0 && (w3c.svRaw || {}).md === 1 && (w3c.svPlain || {}).reqs === 0 && (w3c.svPlain || {}).md === 1, 'Web StructuredSpecView filter, raw mode and plain fallback', JSON.stringify([w3c.svFilt, w3c.svRaw, w3c.svPlain]))
+  const wcard = w3c.card || {}
+  check(String(wcard.text).includes('Agent Tools') && String(wcard.text).includes('Tool registry') && wcard.purposeCls === 1 && JSON.stringify(wcard.countsCls) === '["1 reqs \u00b7 1 scenarios"]' && JSON.stringify(wcard.badges) === '["modified"]' && JSON.stringify(wcard.curBadges) === '[]' && wcard.active === true, 'Web SpecCard shows title/purpose/counts, hides current badge, keeps diff badge', JSON.stringify(wcard))
+
+  // Style + source invariants for Slice 3c
+  const css3c = webCss
+  check(['.os-spec-card', '.os-spec-card-purpose', '.os-spec-card-counts', '.os-spec-kw', '.os-expl-select', '.os-back-to-change', '.os-spec-mode', '.os-spec-purpose'].every(sel => css3c.includes(sel)), 'dashboard/dist/style.css styles spec cards, keywords, dropdowns, back button and spec mode toggle')
+  check(!/#(?:1e1e1e|2a2a2a|1a1a1a|333)\b/i.test(css3c), 'Slice 3c CSS introduces no hardcoded dark surface hex')
 
   // Cross-surface parity suite
   let parityOk = false

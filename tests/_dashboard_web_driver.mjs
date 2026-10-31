@@ -63,7 +63,7 @@ sandbox.window.window = sandbox.window
 sandbox.React = sandbox.window.__HERMES_PLUGIN_SDK__.React
 vm.createContext(sandbox)
 
-const injected = src.replace(/\}\)\(\);\s*$/, 'window.__OS_TEST__ = { ReviewsTab: ReviewsTab, CrewCards: CrewCards, ExplorationList: ExplorationList, ExplorationsPanel: ExplorationsPanel, ChangeDetailTabs: ChangeDetailTabs, DiscoverDialog: DiscoverDialog, ExplorationDialog: ExplorationDialog, Toolbar: Toolbar, Board: Board, DetailDialog: DetailDialog, Modal: Modal, scopeLabel: scopeLabel, verdictClass: verdictClass, sortExplorations: sortExplorations, getExploration: getExploration, discoverSources: discoverSources, renderMarkdown: renderMarkdown };\n})();')
+const injected = src.replace(/\}\)\(\);\s*$/, 'window.__OS_TEST__ = { ReviewsTab: ReviewsTab, CrewCards: CrewCards, ExplorationList: ExplorationList, ExplorationsPanel: ExplorationsPanel, ChangeDetailTabs: ChangeDetailTabs, DiscoverDialog: DiscoverDialog, ExplorationDialog: ExplorationDialog, Toolbar: Toolbar, Board: Board, DetailDialog: DetailDialog, Modal: Modal, scopeLabel: scopeLabel, verdictClass: verdictClass, sortExplorations: sortExplorations, getExploration: getExploration, discoverSources: discoverSources, renderMarkdown: renderMarkdown, ChangeExplorationsPanel: ChangeExplorationsPanel, StructuredSpecView: StructuredSpecView, SpecCard: SpecCard, filterSpecFiles: filterSpecFiles, specCountsLabel: specCountsLabel };\n})();')
 if (injected === src) throw new Error('could not inject test export')
 vm.runInContext(injected, sandbox, { filename: 'dashboard/dist/index.js' })
 const T = sandbox.window.__OS_TEST__
@@ -122,7 +122,8 @@ const reviews = [
 {
   const tree = expand(T.ReviewsTab({ reviews }))
   const badges = collect(tree, n => n.type === C.Badge).map(b => text(b))
-  R.reviews = { badges, round: text(tree).indexOf('Round 2') >= 0, buttons: collect(tree, n => n.type === 'button').length }
+  const sel = collect(tree, n => n.type === 'select')[0]
+  R.reviews = { badges, round: text(tree).indexOf('Round 2') >= 0, options: sel ? collect(sel, n => n.type === 'option').length : 0, optionTexts: sel ? collect(sel, n => n.type === 'option').map(o => text(o)) : [] }
   R.reviewsEmpty = text(T.ReviewsTab({ reviews: [] }))
 }
 {
@@ -202,6 +203,93 @@ const SRC = {
 R.slice3bMd = (() => {
   const md = ['# H1', '#### H4', '', '| Name | Qty |', '| :--- | ---: |', '| a | 3 |', '', '> quote line', '', '---', '', 'x *it* _un_ **b** [ok](https://example.com) [bad](javascript:alert(1))'].join('\n')
   return { html: T.renderMarkdown(md) }
+})()
+// Slice 3c — web surface: inline explorations/reviews dropdowns, back-to-change, rich specs
+R.slice3c = (() => {
+  const SPEC_MD = [
+    '# Compose Specification', '', '## Purpose', 'Define how compose stacks start.', '', '## Requirements', '',
+    '### Requirement: Start order', 'The stack SHALL start db before app and MUST NOT race.', '',
+    '#### Scenario: Cold start', '- **WHEN** the stack boots', '- **THEN** db starts first', '',
+    '### Requirement: Health', 'Each service MUST expose a health check.', '',
+    '#### Scenario: Unhealthy', '- **WHEN** a check fails', '- **THEN** the stack reports failure', '- **AND** exits non-zero',
+  ].join('\n')
+  const files = [
+    { path: 'compose/spec.md', token: 'os_s1', title: 'Compose', domain: 'compose', purpose: 'Define how compose stacks start.\nSecond line.', requirementCount: 2, scenarioCount: 3, status: 'current', changed: false },
+    { path: 'agents/spec.md', token: 'os_s2', title: 'Agent Tools', domain: 'agents', purpose: 'Tool registry', requirementCount: 1, scenarioCount: 1, status: 'modified', changed: true },
+  ]
+  const exs = [
+    { name: 'a', title: 'Alpha Note', scope: 'change:demo', token: 'os_e1', date: '2026-10-30', filename: 'a.md' },
+    { name: 'b', title: 'Beta Note', scope: 'change:demo', token: 'os_e2', date: '2026-10-29', filename: 'b.md' },
+  ]
+  const SRC2 = { id: 'src-1', name: 'demoapp', valid: true, openspec: { explorations: exs, changes: [{ name: 'demo', token: 'os_c1' }] } }
+  const many = expand(T.ChangeExplorationsPanel({ explorations: exs, source: SRC2, onSelect() {} }))
+  const one = expand(T.ChangeExplorationsPanel({ explorations: [exs[0]], source: SRC2, onSelect() {} }))
+  const manySel = collect(many, n => n.type === 'select')[0]
+  const back = []
+  const dlg = expand(T.ExplorationDialog({ source: SRC2, item: exs[0], onClose() {}, onBackToChange: (s) => back.push(s) }))
+  const backBtn = collect(dlg, n => n.type === 'button' && /os-back-to-change/.test(n.props.className || ''))[0]
+  backBtn && backBtn.props.onClick()
+  const chip = collect(dlg, n => n.props && /os-change-link/.test(n.props.className || ''))[0]
+  chip && chip.props.onClick && chip.props.onClick()
+  const wsDlg = expand(T.ExplorationDialog({ source: SRC2, item: Object.assign({}, exs[0], { scope: 'workspace' }), onClose() {}, onBackToChange: (s) => back.push('ws:' + s) }))
+  const reviews2 = expand(T.ReviewsTab({ reviews: [
+    { name: 'findings-v1', filename: 'findings-v1.md', token: 'os_r1', verdict: 'REJECTED', round: 1, content: '# one' },
+    { name: 'findings-v2', filename: 'findings-v2.md', token: 'os_r2', verdict: 'APPROVED', round: 2, content: '# two' },
+  ] }))
+  const rvSel = collect(reviews2, n => n.type === 'select')[0]
+  const reviews1 = expand(T.ReviewsTab({ reviews: [{ name: 'findings-v2', filename: 'findings-v2.md', token: 'os_r2', verdict: 'APPROVED', round: 2, content: '# two' }] }))
+  const sv = expand(T.StructuredSpecView({ md: SPEC_MD }))
+  const svRaw = expand(T.StructuredSpecView({ md: SPEC_MD, defaultMode: 'raw' }))
+  const svPlain = expand(T.StructuredSpecView({ md: '# Plain\nno reqs' }))
+  const svFilt = expand(T.StructuredSpecView({ md: SPEC_MD, defaultFilter: 'health' }))
+  const card = expand(T.SpecCard({ file: files[1], active: false, onSelect() {} }))
+  const cardCur = expand(T.SpecCard({ file: files[0], active: true, onSelect() {} }))
+  return {
+    filterAll: T.filterSpecFiles(files, '').length,
+    filterPath: T.filterSpecFiles(files, 'COMPOSE').map(f => f.path),
+    filterPurpose: T.filterSpecFiles(files, 'registry').map(f => f.path),
+    filterToken: T.filterSpecFiles(files, 'OS_S2').map(f => f.path),
+    filterNone: T.filterSpecFiles(files, 'zzz').length,
+    counts: T.specCountsLabel(files[0]),
+    ce: {
+      selects: collect(many, n => n.type === 'select').length,
+      options: manySel ? collect(manySel, n => n.type === 'option').map(o => text(o)) : [],
+      oneSelects: collect(one, n => n.type === 'select').length,
+      body: collect(many, n => /(^|\s)os-expl-inline(\s|$)/.test((n.props && n.props.className) || '')).length,
+      oneBody: collect(one, n => /(^|\s)os-expl-inline(\s|$)/.test((n.props && n.props.className) || '')).length,
+    },
+    back: {
+      text: backBtn ? text(backBtn) : null,
+      calls: back.slice(),
+      wsButtons: collect(wsDlg, n => n.type === 'button' && /os-back-to-change/.test(n.props.className || '')).length,
+    },
+    rv: {
+      selects: collect(reviews2, n => n.type === 'select').length,
+      options: rvSel ? collect(rvSel, n => n.type === 'option').map(o => text(o)) : [],
+      oneSelects: collect(reviews1, n => n.type === 'select').length,
+      badges: collect(reviews2, n => n.type === C.Badge).map(b => text(b)),
+    },
+    sv: {
+      reqs: collect(sv, n => /(^|\s)os-spec-req(\s|$)/.test((n.props && n.props.className) || '')).length,
+      reqNums: collect(sv, n => /os-spec-req-num/.test((n.props && n.props.className) || '')).map(n => text(n)),
+      purpose: collect(sv, n => /(^|\s)os-spec-purpose(\s|$)/.test((n.props && n.props.className) || '')).length,
+      steps: collect(sv, n => /os-spec-step-label/.test((n.props && n.props.className) || '')).map(n => text(n)),
+      keywords: collect(sv, n => /os-spec-kw/.test((n.props && n.props.className) || '')).map(n => text(n)),
+      toggles: collect(sv, n => n.type === C.Button).map(n => text(n)),
+      filterInputs: collect(sv, n => n.type === C.Input).length,
+    },
+    svRaw: { reqs: collect(svRaw, n => /(^|\s)os-spec-req(\s|$)/.test((n.props && n.props.className) || '')).length, md: collect(svRaw, n => /(^|\s)os-md(\s|$)/.test((n.props && n.props.className) || '')).length },
+    svPlain: { reqs: collect(svPlain, n => /(^|\s)os-spec-req(\s|$)/.test((n.props && n.props.className) || '')).length, md: collect(svPlain, n => /(^|\s)os-md(\s|$)/.test((n.props && n.props.className) || '')).length },
+    svFilt: { reqNums: collect(svFilt, n => /os-spec-req-num/.test((n.props && n.props.className) || '')).map(n => text(n)) },
+    card: {
+      text: text(card),
+      purposeCls: collect(card, n => /os-spec-card-purpose/.test((n.props && n.props.className) || '')).length,
+      countsCls: collect(card, n => /os-spec-card-counts/.test((n.props && n.props.className) || '')).map(n => text(n)),
+      badges: collect(card, n => n.type === C.Badge).map(b => text(b)),
+      curBadges: collect(cardCur, n => n.type === C.Badge).map(b => text(b)),
+      active: /os-spec-item-active/.test((cardCur.props && cardCur.props.className) || ''),
+    },
+  }
 })()
 
 process.stdout.write(JSON.stringify(R))

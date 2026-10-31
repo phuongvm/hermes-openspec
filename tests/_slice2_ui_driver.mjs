@@ -220,6 +220,7 @@ R.reviews = safe(() => {
   return {
     badgeTexts: badges.map(b => texts(b)),
     badgeColors: badges.map(b => (b.props.style && b.props.style.color) || null),
+    optionTexts: find(node, n => n.component === 'option').map(o => texts(o)),
     mentionsV2: text.indexOf('v2') >= 0,
     mentionsRound: text.indexOf('Round 2') >= 0,
     listButtons: find(node, n => n.props && n.props['data-review-item'] != null).length,
@@ -476,6 +477,156 @@ R.slice3b = safe(() => {
     semBadgeBg: badges.map(n => n.props.style.background), semBadgeFg: badges.map(n => n.props.style.color),
     rawKinds: rawLines.map(n => n.props['data-diff-line']), rawColors: rawLines.map(n => n.props.style.color),
     taskStates: taskMarks.map(n => n.props['data-task-state']), taskDoneColor: taskMarks[0] && taskMarks[0].props.style.color,
+  }
+})
+
+// Slice 3c — inline Explorations/Reviews viewers, back-to-change nav, rich Specs sidebar, StructuredSpecView
+R.slice3c = safe(() => {
+  const SPEC_MD = [
+    '---', 'title: x', '---',
+    '# Compose Specification', '', '## Purpose', 'Define how compose stacks start.', '', '## Requirements', '',
+    '### Requirement: Start order', 'The stack SHALL start db before app and MUST NOT race.', '',
+    '#### Scenario: Cold start', '- **WHEN** the stack boots', '- **THEN** db starts first', '',
+    '### Requirement: Health', 'Each service MUST expose a health check.', '',
+    '#### Scenario: Unhealthy', '- **WHEN** a check fails', '- **THEN** the stack reports failure', '- **AND** exits non-zero',
+  ].join('\n')
+  const parsed = t.parseSpec(t.stripFrontmatter(SPEC_MD))
+  const files = [
+    { path: 'compose/spec.md', token: 'os_s1', title: 'Compose', domain: 'compose', purpose: 'Define how compose stacks start.\nSecond line.', requirementCount: 2, scenarioCount: 3, status: 'current' },
+    { path: 'agents/spec.md', token: 'os_s2', title: 'Agent Tools', domain: 'agents', purpose: 'Tool registry', requirementCount: 1, scenarioCount: 1, status: 'modified' },
+    { path: 'bare.md', token: 'os_s3', title: 'bare.md', domain: 'bare', purpose: '', status: 'added' },
+  ]
+
+  // StructuredSpecView — structured, raw and filtered modes
+  const sv = t.StructuredSpecView({ content: SPEC_MD })
+  const reqCards = find(sv, n => n.props && n.props['data-spec-req'] != null)
+  const steps = find(sv, n => n.props && n.props['data-spec-step'] != null)
+  const kws = find(sv, n => n.props && n.props['data-spec-keyword'] != null)
+  const purposeNode = find(sv, n => n.props && n.props['data-spec-purpose'] === 'true')[0]
+  const toggles = find(sv, n => n.props && n.props['data-spec-mode'] != null).map(n => n.props['data-spec-mode'] + ':' + texts(n))
+  const filtered = t.StructuredSpecView({ content: SPEC_MD, defaultFilter: 'health' })
+  const raw = t.StructuredSpecView({ content: SPEC_MD, defaultMode: 'raw' })
+  const plain = t.StructuredSpecView({ content: '# Just text\nno requirements here' })
+
+  // ChangeExplorationsView — dropdown when N>1, direct selection when N===1
+  const exs = SRC.openspec.explorations.filter(e => e.scope === 'change:demo').concat([
+    { name: 'spike', title: 'Spike Notes', scope: 'change:demo', token: 'os_000009', date: '2026-10-29', filename: 'spike.md', path: '/repos/demoapp/openspec/changes/demo/explorations/spike.md' },
+  ])
+  const pool = SRC.openspec.explorations.map(e => e.token === 'os_000002' ? Object.assign({}, e, { crewCards: [{ id: 't_pool01', title: 'Pooled', status: 'running', url: '/crew?card=t_pool01' }] }) : e)
+  const srcPool = Object.assign({}, SRC, { openspec: Object.assign({}, SRC.openspec, { explorations: pool }) })
+  const many = t.ChangeExplorationsView({ api: {}, sourceId: 'src-1', explorations: exs, source: srcPool, allSources: [srcPool], allItems: pool, ctx: {} })
+  const manySecond = t.ChangeExplorationsView({ api: {}, sourceId: 'src-1', explorations: exs, source: srcPool, allSources: [srcPool], allItems: pool, ctx: {}, defaultIndex: 1 })
+  const one = t.ChangeExplorationsView({ api: {}, sourceId: 'src-1', explorations: [exs[0]], source: srcPool, allSources: [srcPool], allItems: pool, ctx: {} })
+  const manySel = find(many, n => n.component === 'select')[0]
+  const bodyOf = (node) => find(node, n => n.component === t.ExplorationBody)[0]
+  const chipsOf = (node) => find(node, n => n.component === t.CrewCardChips)[0]
+  const meta = find(many, n => n.props && n.props['data-exploration-meta'] === 'true')[0]
+
+  // ReviewsView — dropdown when N>1
+  const rv2 = t.ReviewsView({ reviews: REVIEWS })
+  const rv1 = t.ReviewsView({ reviews: [REVIEWS[1]] })
+  const rvSel = find(rv2, n => n.component === 'select')[0]
+
+  // ExplorationDetailDrawer — back-to-change navigation
+  const backCalls = []
+  const exChange = SRC.openspec.explorations[1]
+  const dBack = t.ExplorationDetailDrawer({ api: {}, sourceId: 'src-1', exploration: exChange, source: SRC, allSources: [SRC], allItems: SRC.openspec.explorations, onClose() {}, onBackToChange: (slug) => backCalls.push(slug) })
+  const backBtn = find(dBack, n => n.props && n.props['data-back-to-change'] != null)[0]
+  backBtn && backBtn.props.onClick && backBtn.props.onClick()
+  const dNoHandler = t.ExplorationDetailDrawer({ api: {}, sourceId: 'src-1', exploration: exChange, source: SRC, allSources: [SRC], allItems: SRC.openspec.explorations, onClose() {} })
+  const dWorkspace = t.ExplorationDetailDrawer({ api: {}, sourceId: 'src-1', exploration: SRC.openspec.explorations[0], source: SRC, allSources: [SRC], allItems: SRC.openspec.explorations, onClose() {}, onBackToChange: (s) => backCalls.push(s) })
+  const bodyWithNav = t.ExplorationBody({ api: {}, sourceId: 'src-1', exploration: exChange, onOpenChange: (slug) => backCalls.push('badge:' + slug) })
+  const badgeLink = find(bodyWithNav, n => n.props && n.props['data-change-link'] != null)[0]
+  badgeLink && badgeLink.props.onClick && badgeLink.props.onClick()
+  badgeLink && badgeLink.props.onKeyDown && badgeLink.props.onKeyDown({ key: 'Enter', preventDefault() {} })
+
+  // ChangeDetailDrawer: Explorations tab renders ChangeExplorationsView (explorations-only change => first tab)
+  const prevChange = globalThis.__fixtures.change
+  globalThis.__fixtures.change = { data: { name: 'demo', title: 'Demo', explorations: exs } }
+  const cdd = t.ChangeDetailDrawer({ api: {}, sourceId: 'src-1', change: SRC.openspec.changes[0], source: srcPool, allSources: [srcPool], allItems: SRC.openspec.changes, ctx: {}, width: 700, onClose() {} })
+  const cddView = find(cdd, n => n.component === t.ChangeExplorationsView)[0]
+  const cddLegacyRows = find(cdd, n => n.props && n.props['data-exploration-row'] != null).length
+  globalThis.__fixtures.change = { data: { name: 'demo', title: 'Demo', specs: [{ path: 'a/spec.md', content: SPEC_MD }] } }
+  const cddSpecs = t.ChangeDetailDrawer({ api: {}, sourceId: 'src-1', change: SRC.openspec.changes[0], source: srcPool, allSources: [srcPool], allItems: SRC.openspec.changes, ctx: {}, width: 700, onClose() {} })
+  const sdv = find(cddSpecs, n => n.component === t.SpecsDetailView)[0]
+  const sdvTree = sdv ? t.SpecsDetailView(sdv.props) : null
+  globalThis.__fixtures.change = prevChange
+
+  // SpecsView — rich sidebar cards + filter
+  const origUq = globalThis.__uq
+  globalThis.__uq = (o) => o.queryKey[1] === 'spec-browser' ? { data: { files, branch: 'main' }, isLoading: false, error: null, refetch() {} } : origUq(o)
+  const specsNode = t.SpecsView({ api: {}, sourceId: 'src-1', ctx: {} })
+  globalThis.__uq = origUq
+  const cards = find(specsNode, n => n.props && n.props['data-spec-card'] != null)
+  const cardInfo = cards.map(c => ({
+    path: c.props['data-spec-card'],
+    text: texts(c),
+    purpose: find(c, n => n.props && n.props['data-spec-card-purpose'] === 'true').map(n => ({ text: texts(n), ws: n.props.style && n.props.style.whiteSpace })),
+    counts: find(c, n => n.props && n.props['data-spec-card-counts'] === 'true').map(n => texts(n)),
+    badges: find(c, n => n.component === sdk.Badge).map(n => texts(n)),
+  }))
+  const filterInput = find(specsNode, n => n.props && n.props['data-specs-filter'] === 'true')[0]
+
+  return {
+    parsed: { title: parsed.title, purpose: parsed.purpose, reqs: parsed.requirements.map(r => ({ name: r.name, scns: r.scenarios.length, steps: r.scenarios.map(s => s.steps.map(x => x.type)) })) },
+    filterAll: t.filterSpecFiles(files, '').length,
+    filterTitle: t.filterSpecFiles(files, 'agent tools').map(f => f.path),
+    filterPath: t.filterSpecFiles(files, 'COMPOSE/').map(f => f.path),
+    filterDomain: t.filterSpecFiles(files, 'agents').map(f => f.path),
+    filterPurpose: t.filterSpecFiles(files, 'registry').map(f => f.path),
+    filterToken: t.filterSpecFiles(files, 'OS_S3').map(f => f.path),
+    filterNone: t.filterSpecFiles(files, 'zzz').length,
+    countsLabel: [t.specCountsLabel(files[0]), t.specCountsLabel(files[2])],
+    reqFilter: t.filterSpecRequirements(parsed.requirements, 'exits non-zero').map(x => 'R' + (x.index + 1)),
+    statusBadges: ['current', 'unchanged', 'missing', 'added', 'modified', 'deleted', undefined].map(s => t.specStatusBadgeVisible(s)),
+    sv: {
+      reqNums: reqCards.map(c => c.props['data-spec-req']),
+      stepTypes: steps.map(s => s.props['data-spec-step']),
+      stepText: steps.map(s => texts(s)),
+      keywords: kws.map(k => k.props['data-spec-keyword']),
+      purpose: purposeNode && texts(purposeNode),
+      toggles,
+      inputs: find(sv, n => n.component === sdk.Input).length,
+      noFrontmatter: texts(sv).indexOf('title: x') < 0,
+    },
+    svFiltered: { reqNums: find(filtered, n => n.props && n.props['data-spec-req'] != null).map(c => c.props['data-spec-req']) },
+    svRaw: { structured: find(raw, n => n.props && n.props['data-structured-spec'] === 'true').length, markdown: find(raw, n => n.component === t.MarkdownView).length, toggles: find(raw, n => n.props && n.props['data-spec-mode'] != null).length },
+    svPlain: { structured: find(plain, n => n.props && n.props['data-structured-spec'] === 'true').length, markdown: find(plain, n => n.component === t.MarkdownView).length },
+    ce: {
+      selectCount: find(many, n => n.component === 'select').length,
+      options: manySel ? find(manySel, n => n.component === 'option').length : 0,
+      optionText: manySel ? find(manySel, n => n.component === 'option').map(o => texts(o)) : [],
+      selectedValue: manySel && manySel.props.value,
+      bodyName: bodyOf(many) && bodyOf(many).props.exploration.name,
+      bodyInline: bodyOf(many) && bodyOf(many).props.inline,
+      secondBodyName: bodyOf(manySecond) && bodyOf(manySecond).props.exploration.name,
+      metaText: meta ? texts(meta) : '',
+      copyRefs: find(many, n => n.component === sdk.CopyButton).map(n => n.props.text),
+      chipCards: chipsOf(many) ? chipsOf(many).props.cards.map(c => c.id) : null,
+      oneSelectCount: find(one, n => n.component === 'select').length,
+      oneBodyName: bodyOf(one) && bodyOf(one).props.exploration.name,
+      oneChipsRendered: !!chipsOf(one),
+    },
+    rv: {
+      selectCount: find(rv2, n => n.component === 'select').length,
+      options: rvSel ? find(rvSel, n => n.component === 'option').map(o => texts(o)) : [],
+      value: rvSel && rvSel.props.value,
+      badges: find(rv2, n => n.component === sdk.Badge).map(b => texts(b)),
+      mentionsV2: texts(rv2).indexOf('v2') >= 0,
+      oneSelectCount: find(rv1, n => n.component === 'select').length,
+      oneBadges: find(rv1, n => n.component === sdk.Badge).map(b => texts(b)),
+    },
+    back: {
+      text: backBtn ? texts(backBtn) : null,
+      calls: backCalls.slice(),
+      noHandlerBtn: find(dNoHandler, n => n.props && n.props['data-back-to-change'] != null).length,
+      workspaceBtn: find(dWorkspace, n => n.props && n.props['data-back-to-change'] != null).length,
+      badgeRole: badgeLink && badgeLink.props.role,
+      badgeText: badgeLink ? texts(badgeLink) : null,
+    },
+    cdd: { hasView: !!cddView, viewCount: cddView && cddView.props.explorations.length, legacyRows: cddLegacyRows, hasSpecsView: !!sdv, specsStructured: sdvTree ? find(sdvTree, n => n.component === t.StructuredSpecView).length : 0 },
+    cards: cardInfo,
+    filterInput: !!filterInput,
   }
 })
 

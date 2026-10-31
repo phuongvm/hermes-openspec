@@ -278,6 +278,61 @@
     return s.indexOf("change:") === 0 ? "Change: " + s.slice(7) : "Workspace";
   }
   function nonEmpty(list) { return Array.isArray(list) && list.length > 0; }
+
+  // ── Slice 3c helpers (mirror desktop/plugin.js) ──────────────────────
+  function filterSpecFiles(files, query) {
+    var q = String(query || "").trim().toLowerCase();
+    var list = files || [];
+    if (!q) return list;
+    return list.filter(function (f) {
+      return [f.title, f.path, f.domain, f.purpose, f.token].some(function (v) {
+        return String(v || "").toLowerCase().indexOf(q) >= 0;
+      });
+    });
+  }
+  function specCountsLabel(file) {
+    if (!file || typeof file.requirementCount !== "number") return "";
+    return file.requirementCount + " reqs \u00b7 " + (file.scenarioCount || 0) + " scenarios";
+  }
+  function specStatusBadgeVisible(status) { return status === "added" || status === "modified" || status === "deleted"; }
+  function specRequirementText(req) {
+    var parts = [req.name, req.description];
+    (req.scenarios || []).forEach(function (scn) {
+      parts.push(scn.name);
+      (scn.steps || []).forEach(function (st) { parts.push(st.type, st.text); });
+    });
+    return parts.join("\n").toLowerCase();
+  }
+  // Keeps the original requirement index so R-numbers stay stable while filtering.
+  function filterSpecRequirements(reqs, query) {
+    var q = String(query || "").trim().toLowerCase();
+    var out = [];
+    (reqs || []).forEach(function (req, index) {
+      if (!q || specRequirementText(req).indexOf(q) >= 0) out.push({ index: index, req: req });
+    });
+    return out;
+  }
+  function changeSlugFromScope(scope) {
+    var s = String(scope || "");
+    return s.indexOf("change:") === 0 ? s.slice(7) : "";
+  }
+  function reviewOptionLabel(r) {
+    return "[" + (r.verdict || "PENDING") + "] " + r.name + (r.round != null ? " \u00b7 Round " + r.round : "");
+  }
+  var SPEC_KEYWORD_RE = /\b(SHALL NOT|MUST NOT|SHOULD NOT|SHALL|MUST|SHOULD)\b/g;
+  function renderSpecKeywords(text) {
+    var parts = [];
+    var src = String(text || "");
+    var last = 0, m;
+    SPEC_KEYWORD_RE.lastIndex = 0;
+    while ((m = SPEC_KEYWORD_RE.exec(src)) !== null) {
+      if (m.index > last) parts.push(src.slice(last, m.index));
+      parts.push(h("strong", { key: "kw" + m.index, className: cn("os-spec-kw", m[1].indexOf("NOT") >= 0 && "os-spec-kw-not") }, m[1]));
+      last = m.index + m[0].length;
+    }
+    if (last < src.length) parts.push(src.slice(last));
+    return parts;
+  }
   function sortExplorations(items) {
     return (items || []).slice().sort(function (a, b) {
       var da = String(a.date || ""), db = String(b.date || "");
@@ -407,17 +462,57 @@
     var _i = useState(Math.max(0, (reviews || []).length - 1));
     var idx = _i[0], setIdx = _i[1];
     if (!nonEmpty(reviews)) return h("p", { className: "os-empty" }, "No reviews.");
-    var cur = reviews[idx] || reviews[reviews.length - 1];
+    var cur = reviews[Math.min(idx, reviews.length - 1)] || reviews[reviews.length - 1];
     return h("div", { className: "os-reviews" },
-      h("div", { className: "os-review-list" }, reviews.map(function (r, i) {
-        return h("button", { key: r.token || r.name, className: cn("os-review-item", r === cur && "os-review-item-active"), onClick: function () { setIdx(i); } },
-          h(Badge, { className: cn("os-verdict", verdictClass(r.verdict)) }, r.verdict || "PENDING"),
-          h("span", { className: "os-review-name" }, r.name),
-          r.round != null ? h("span", { className: "os-review-round" }, "Round " + r.round) : null
-        );
-      })),
-      h("div", { className: "os-review-file" }, cur.filename),
+      reviews.length > 1 ? h("select", {
+        className: "os-expl-select os-review-select", value: reviews.indexOf(cur),
+        onChange: function (e) { setIdx(parseInt(e.target.value, 10)); }
+      }, reviews.map(function (r, i) {
+        return h("option", { key: r.token || r.name, value: i }, reviewOptionLabel(r));
+      })) : null,
+      h("div", { className: "os-review-meta" },
+        h(Badge, { className: cn("os-verdict", verdictClass(cur.verdict)) }, cur.verdict || "PENDING"),
+        h("span", { className: "os-review-file" }, cur.filename),
+        cur.round != null ? h("span", { className: "os-review-round" }, "Round " + cur.round) : null
+      ),
       h(Markdown, { md: cur.content })
+    );
+  }
+
+  // Inline Explorations tab for the change dialog: dropdown when N > 1, direct selection when N === 1.
+  function ChangeExplorationsPanel(_ref) {
+    var explorations = _ref.explorations, source = _ref.source;
+    var list = sortExplorations(explorations);
+    var _i = useState(0);
+    var idx = _i[0], setIdx = _i[1];
+    if (!list.length) return h("p", { className: "os-empty" }, "No explorations.");
+    var ex = list[Math.min(idx, list.length - 1)];
+    var _d = useState(null), _l = useState(true), _e = useState("");
+    var detail = _d[0], setDetail = _d[1], loading = _l[0], setLoading = _l[1], err = _e[0], setErr = _e[1];
+    useEffect(function () {
+      var alive = true;
+      setLoading(true); setErr(""); setDetail(null);
+      getExploration(source.id, ex.name, ex.scope).then(function (d) { if (alive) { setDetail(d); setLoading(false); } }).catch(function (e) { if (alive) { setErr(apiErr(e)); setLoading(false); } });
+      return function () { alive = false; };
+    }, [source.id, ex.name, ex.scope]);
+    var data = detail || ex;
+    return h("div", { className: "os-expl-inline-wrap" },
+      list.length > 1 ? h("select", {
+        className: "os-expl-select", value: list.indexOf(ex),
+        onChange: function (e) { setIdx(parseInt(e.target.value, 10)); }
+      }, list.map(function (x, i) { return h("option", { key: x.token || x.name, value: i }, x.title || x.name); })) : null,
+      h("div", { className: "os-expl-meta os-expl-meta-inline" },
+        ex.date ? h("span", { className: "os-expl-date" }, ex.date) : null,
+        h(Badge, { variant: "outline", className: "os-expl-scope" }, scopeLabel(ex.scope)),
+        h("span", { className: "os-expl-file" }, ex.filename),
+        ex.token ? h(CopyChip, { text: source.name + "/" + ex.token }) : null
+      ),
+      h(CrewCards, { cards: (detail && detail.crewCards) || ex.crewCards }),
+      h("div", { className: "os-expl-inline" },
+        loading ? h("p", { className: "os-empty" }, "Loading\u2026") :
+          err ? h("p", { className: "os-err" }, err) :
+            h(Markdown, { md: data.content })
+      )
     );
   }
 
@@ -455,7 +550,7 @@
   }
 
   function ExplorationDialog(_ref) {
-    var source = _ref.source, item = _ref.item, onClose = _ref.onClose;
+    var source = _ref.source, item = _ref.item, onClose = _ref.onClose, onBackToChange = _ref.onBackToChange;
     var _d = useState(null), _l = useState(true), _e = useState("");
     var detail = _d[0], setDetail = _d[1], loading = _l[0], setLoading = _l[1], err = _e[0], setErr = _e[1];
     useEffect(function () {
@@ -463,10 +558,15 @@
       getExploration(source.id, item.name, item.scope).then(function (d) { setDetail(d); setLoading(false); }).catch(function (e) { setErr(apiErr(e)); setLoading(false); });
     }, [source.id, item.name, item.scope]);
     var data = detail || item;
+    var changeSlug = changeSlugFromScope(data.scope || item.scope);
+    var canGoBack = !!changeSlug && typeof onBackToChange === "function";
     return h(Modal, { title: item.title || item.name, onClose: onClose, wide: true },
+      canGoBack ? h("button", { type: "button", className: "os-back-to-change", onClick: function () { onBackToChange(changeSlug); } }, "\u2190 Back to " + changeSlug) : null,
       h("div", { className: "os-detail-chip" },
         h(CopyChip, { text: source.name + "/" + item.token }),
-        h(Badge, { variant: "outline" }, scopeLabel(data.scope)),
+        canGoBack
+          ? h("button", { type: "button", className: "os-change-link", title: "Open change " + changeSlug, onClick: function () { onBackToChange(changeSlug); } }, h(Badge, { variant: "outline" }, scopeLabel(data.scope)))
+          : h(Badge, { variant: "outline" }, scopeLabel(data.scope)),
         data.date ? h("span", { className: "os-expl-date" }, data.date) : null,
         data.path ? h(CopyChip, { text: data.path }) : null),
       h(CrewCards, { cards: (detail && detail.crewCards) || item.crewCards }),
@@ -768,7 +868,7 @@
       : activeTab === "reviews"
         ? h(ReviewsTab, { reviews: detail.reviews })
         : activeTab === "explorations"
-          ? h(ExplorationList, { items: detail.explorations, source: source, onSelect: onSelectExploration || function () {} })
+          ? h(ChangeExplorationsPanel, { explorations: detail.explorations, source: source })
       : activeTab === "tasks"
         ? h(TasksView, { md: detail[activeTab], stats: detail.taskStats })
         : h(Markdown, { md: detail[activeTab] });
@@ -865,31 +965,43 @@
     return { title: title, purpose: purpose, requirements: reqs };
   }
 
-  function SpecContentView(_ref) {
+
+  // Shared by SpecsView and the change dialog Specs tab: Purpose callout, R1..Rn requirement cards, WHEN/THEN/AND steps.
+  function StructuredSpecView(_ref) {
     var md = _ref.md;
+    var _m = useState(_ref.defaultMode || "structured"), _f = useState(_ref.defaultFilter || "");
+    var mode = _m[0], setMode = _m[1], filter = _f[0], setFilter = _f[1];
     var spec = useMemo(function () { return parseSpec(md); }, [md]);
-    if (!spec.requirements.length) {
-      return h(Markdown, { md: md });
-    }
-    return h("div", { className: "os-spec-content" },
+    if (!spec.requirements.length) return h(Markdown, { md: md });
+    var visible = filterSpecRequirements(spec.requirements, filter);
+    var toggle = h("div", { className: "os-spec-modes" },
+      h(Button, { variant: mode === "structured" ? "default" : "outline", size: "sm", className: "os-spec-mode", onClick: function () { setMode("structured"); } }, "Structured"),
+      h(Button, { variant: mode === "raw" ? "default" : "outline", size: "sm", className: "os-spec-mode", onClick: function () { setMode("raw"); } }, "Raw"),
+      mode === "structured" ? h(Input, { placeholder: "Filter requirements\u2026", value: filter, onChange: function (e) { setFilter(e.target.value); }, className: "os-filter-input" }) : null
+    );
+    if (mode === "raw") return h("div", { className: "os-spec-structured" }, toggle, h(Markdown, { md: md }));
+    return h("div", { className: "os-spec-content os-spec-structured" },
+      toggle,
       spec.purpose ? h("div", { className: "os-spec-purpose" },
         h("div", { className: "os-spec-purpose-label" }, "Purpose"),
         h("p", null, spec.purpose)
       ) : null,
-      spec.requirements.map(function (req, ri) {
-        return h("div", { key: ri, className: "os-spec-req" },
+      !visible.length ? h("p", { className: "os-empty" }, "No requirements match the filter.") : null,
+      visible.map(function (entry) {
+        var req = entry.req;
+        return h("div", { key: entry.index, className: "os-spec-req" },
           h("div", { className: "os-spec-req-head" },
-            h("span", { className: "os-spec-req-num" }, "R" + (ri + 1)),
+            h("span", { className: "os-spec-req-num" }, "R" + (entry.index + 1)),
             h("span", { className: "os-spec-req-name" }, req.name)
           ),
-          req.description ? h("p", { className: "os-spec-req-desc" }, req.description) : null,
+          req.description ? h("p", { className: "os-spec-req-desc" }, renderSpecKeywords(req.description)) : null,
           req.scenarios.map(function (scn, si) {
             return h("div", { key: si, className: "os-spec-scn" },
               h("div", { className: "os-spec-scn-name" }, scn.name),
               scn.steps.map(function (st, sti) {
                 return h("div", { key: sti, className: cn("os-spec-step", "os-spec-step-" + st.type.toLowerCase()) },
                   h("span", { className: "os-spec-step-label" }, st.type),
-                  h("span", { className: "os-spec-step-text" }, st.text)
+                  h("span", { className: "os-spec-step-text" }, renderSpecKeywords(st.text))
                 );
               })
             );
@@ -897,6 +1009,30 @@
         );
       })
     );
+  }
+
+  function SpecCard(_ref) {
+    var file = _ref.file, active = _ref.active, onSelect = _ref.onSelect;
+    var purposeLine = String(file.purpose || "").split("\n")[0];
+    var counts = specCountsLabel(file);
+    var showTitle = file.title && file.title !== file.path;
+    return h("button", {
+      className: cn("os-spec-item", "os-spec-card", active && "os-spec-item-active", file.changed && "os-spec-item-changed"),
+      onClick: onSelect
+    },
+      h("div", { className: "os-spec-card-head" },
+        h(Icon, { d: ICO.file, size: 13 }),
+        h("span", { className: "os-spec-card-title" }, showTitle ? file.title : file.path),
+        specStatusBadgeVisible(file.status) ? h(Badge, { className: "os-spec-status os-status-" + file.status }, file.status) : null
+      ),
+      showTitle ? h("div", { className: "os-spec-item-path" }, file.path) : null,
+      purposeLine ? h("div", { className: "os-spec-card-purpose" }, purposeLine) : null,
+      counts ? h("div", { className: "os-spec-card-counts" }, counts) : null
+    );
+  }
+
+  function SpecContentView(_ref) {
+    return h(StructuredSpecView, { md: _ref.md });
   }
 
   // ── Semantic spec delta view (requirement-level diff) ──────────────
@@ -1056,6 +1192,8 @@
     var loading = _l2[0], setLoading = _l2[1], err = _e3[0], setErr = _e3[1];
     var selPath = _sel[0], setSelPath = _sel[1], before = _bf[0], setBefore = _bf[1], after = _af[0], setAfter = _af[1];
     var sortMode = _sm[0], setSortMode = _sm[1];
+    var _sf = useState("");
+    var specFilter = _sf[0], setSpecFilter = _sf[1];
     var selDiffModes = _sdm;
     var firstLoad = useRef(true);
 
@@ -1115,25 +1253,16 @@
       loading ? h("p", { className: "os-empty" }, "Loading…") :
         err ? h("p", { className: "os-err" }, err) :
           browser && browser.files && browser.files.length ? (function () {
-            var sorted = sortFiles(browser.files, sortMode);
+            var sorted = filterSpecFiles(sortFiles(browser.files, sortMode), specFilter);
             return h("div", { className: "os-specs-grid", style: { gridTemplateColumns: sideW + "px 6px 1fr" } },
               h("div", { className: "os-specs-list" },
+                h(Input, { placeholder: "Filter specs\u2026", value: specFilter, onChange: function (e) { setSpecFilter(e.target.value); }, className: "os-filter-input os-specs-filter" }),
+                !sorted.length ? h("p", { className: "os-empty" }, "No specs match the filter.") : null,
                 sorted.map(function (f) {
-                  var summaryParts = [];
-                  if (f.semantic_summary) {
-                    if (f.semantic_summary.added) summaryParts.push("+" + f.semantic_summary.added);
-                    if (f.semantic_summary.modified) summaryParts.push("~" + f.semantic_summary.modified);
-                    if (f.semantic_summary.removed) summaryParts.push("-" + f.semantic_summary.removed);
-                  }
-                  return h("button", {
-                    key: f.path, className: cn("os-spec-item", f.path === selPath && "os-spec-item-active", f.changed && "os-spec-item-changed"),
-                    onClick: function () { setSelPath(f.path); if (onSelectToken && f.token) onSelectToken(f.token); },
-                  },
-                    h(Icon, { d: ICO.file, size: 13 }),
-                    h("span", { className: "os-spec-item-path" }, f.path),
-                    f.changed ? h(Badge, { className: "os-spec-status os-status-" + f.status }, f.status) : null,
-                    summaryParts.length ? h("span", { className: "os-spec-item-summary" }, summaryParts.join(" ")) : null
-                  );
+                  return h(SpecCard, {
+                    key: f.path, file: f, active: f.path === selPath,
+                    onSelect: function () { setSelPath(f.path); if (onSelectToken && f.token) onSelectToken(f.token); }
+                  });
                 })
               ),
               h("div", {
@@ -1305,6 +1434,13 @@
     function closeItem() { setSelItem(null); if (active) setHash(active.name, null); }
     function onTabChange(tab) { if (active && selItem && selItem.token) setHash(active.name, selItem.token, tab); }
     function selectSpec(token) { if (active) setHash(active.name, token, null); }
+    // Back from an exploration dialog to its owning change dialog, landing on the Explorations tab.
+    function backToChange(slug) {
+      var changes = (active && active.openspec && active.openspec.changes) || [];
+      var found = changes.find(function (c) { return c.name === slug || c.token === slug; });
+      setSelExploration(null);
+      if (found) { setView("board"); setSelItem(found); setHash(active.name, found.token, "explorations"); }
+    }
 
     function onAdd() { setDlg({ mode: "add" }); }
     function onEdit() { if (active) setDlg({ mode: "edit", activeId: active.id, path: active.path, name: active.name }); }
@@ -1371,7 +1507,7 @@
       active && active.valid && view === "explorations" ? h(ExplorationsPanel, { source: active, onSelect: setSelExploration }) : null,
       active && active.valid && view === "specs" ? h(SpecsView, { source: active, anchorToken: anchor.token, onSelectToken: selectSpec }) : null,
       selItem && active ? h(DetailDialog, { source: active, item: selItem, onClose: closeItem, anchor: anchor.anchor, onTabChange: onTabChange, onSelectExploration: setSelExploration }) : null,
-      selExploration && active ? h(ExplorationDialog, { source: active, item: selExploration, onClose: function () { setSelExploration(null); } }) : null,
+      selExploration && active ? h(ExplorationDialog, { source: active, item: selExploration, onClose: function () { setSelExploration(null); }, onBackToChange: backToChange }) : null,
       discoverOpen && active ? h(DiscoverDialog, { source: active, onClose: function () { setDiscoverOpen(false); }, onDone: function () { loadSources(true); } }) : null,
       dlg ? h(SourceDialog, {
         mode: dlg.mode, initialPath: dlg.path, initialName: dlg.name, activeId: dlg.activeId,

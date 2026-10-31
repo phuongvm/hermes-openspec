@@ -126,3 +126,67 @@ def test_spec_browser_dirty_diff_for_subproject(mono):
     browser = plugin_api._spec_browser(sub, dirty=True)
     assert [f["path"] for f in browser["files"]] == ["compose/spec.md"]
     assert browser["files"][0]["status"] == "modified"
+
+
+# ── Slice 3c: spec_parser metadata on spec browser + spec detail ───────────
+
+RICH_SPEC = (
+    "# Compose Specification\n\n## Purpose\nDefine how compose stacks start.\nSecond purpose line.\n\n"
+    "## Requirements\n\n"
+    "### Requirement: Start order\nThe stack SHALL start db before app.\n\n"
+    "#### Scenario: Cold start\n- **WHEN** the stack boots\n- **THEN** db starts first\n\n"
+    "#### Scenario: Warm start\n- **WHEN** db is already up\n- **THEN** app starts\n\n"
+    "### Requirement: Health\nEach service MUST expose a health check.\n\n"
+    "#### Scenario: Unhealthy\n- **WHEN** a check fails\n- **THEN** the stack reports failure\n- **AND** exits non-zero\n"
+)
+
+
+def _rich_mono(mono):
+    sub = mono["root"] / "docker-compose"
+    _write(sub / "openspec" / "specs" / "compose" / "spec.md", RICH_SPEC)
+    _write(sub / "openspec" / "specs" / "bare.md", "no heading at all\n")
+    return sub
+
+
+def test_spec_browser_current_entries_carry_parser_metadata(mono):
+    sub = _rich_mono(mono)
+    files = {f["path"]: f for f in plugin_api._spec_browser(sub)["files"]}
+    rich = files["compose/spec.md"]
+    assert rich["domain"] == "compose"
+    assert rich["title"] == "Compose"
+    assert rich["purpose"] == "Define how compose stacks start.\nSecond purpose line."
+    assert rich["requirementCount"] == 2
+    assert rich["scenarioCount"] == 3
+    bare = files["bare.md"]
+    assert bare["domain"] == "bare"
+    assert bare["title"] == "bare.md"
+    assert bare["purpose"] == ""
+    assert (bare["requirementCount"], bare["scenarioCount"]) == (0, 0)
+
+
+def test_spec_browser_dirty_entries_carry_parser_metadata(mono):
+    sub = _rich_mono(mono)
+    dirty = {f["path"]: f for f in plugin_api._spec_browser(sub, dirty=True)["files"]}
+    assert dirty["compose/spec.md"]["requirementCount"] == 2
+    assert dirty["compose/spec.md"]["domain"] == "compose"
+    assert dirty["compose/spec.md"]["status"] == "modified"
+
+
+def test_spec_detail_carries_parser_metadata(mono):
+    sub = _rich_mono(mono)
+    detail = plugin_api._spec_detail(sub, "compose/spec.md")
+    assert detail["domain"] == "compose"
+    assert detail["title"] == "Compose"
+    assert detail["purpose"].startswith("Define how compose stacks start.")
+    assert (detail["requirementCount"], detail["scenarioCount"]) == (2, 3)
+    assert detail["content"] == RICH_SPEC
+
+
+def test_spec_detail_endpoint_exposes_metadata(mono):
+    sub = _rich_mono(mono)
+    client = mono["client"]
+    child = client.post("/sources", json={"path": str(sub), "name": "compose"}).json()["source"]
+    body = client.get(f"/sources/{child['id']}/specs", params={"path": "compose/spec.md"}).json()
+    assert body["requirementCount"] == 2 and body["scenarioCount"] == 3
+    listing = client.get(f"/sources/{child['id']}/spec-browser").json()["files"]
+    assert {f["path"]: f["scenarioCount"] for f in listing}["compose/spec.md"] == 3
