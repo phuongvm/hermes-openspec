@@ -27,7 +27,7 @@ var RADAR_CSS = ' @property --os-arc { syntax: "<angle>"; inherits: false; initi
   ' .os-card-live, .os-card-review { position: relative; }' +
   ' .os-card-live::after, .os-card-review::after { content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;' +
   ' background: conic-gradient(from var(--os-arc), transparent 0 68%, var(--os-radar-color) 88%, transparent 100%);' +
-  ' -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; }' +
+  ' -webkit-mask: linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box exclude, linear-gradient(#000 0 0); }' +
   ' .os-card-live::after { --os-radar-color: var(--ui-success, #34d399); animation: os-radar-spin 2.2s linear infinite; }' +
   ' .os-card-review::after { --os-radar-color: #f59e0b; animation: os-radar-spin 6s linear infinite; }' +
   ' @media (prefers-reduced-motion: reduce) { .os-card-live::after, .os-card-review::after { animation: none; } }'
@@ -2395,7 +2395,7 @@ var CHIP_CSS = ' @property --os-chip-arc { syntax: "<angle>"; inherits: false; i
   ' .os-status-chip b { font-weight: 600; color: var(--ui-accent, #60a5fa); }' +
   ' .os-status-chip.os-chip-live::after { content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;' +
   ' background: conic-gradient(from var(--os-chip-arc), transparent 0 68%, var(--ui-success, #34d399) 88%, transparent 100%);' +
-  ' -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;' +
+  ' -webkit-mask: linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box exclude, linear-gradient(#000 0 0);' +
   ' animation: os-chip-spin 2.2s linear infinite; }' +
   ' .os-status-chip.os-chip-live .codicon { color: var(--ui-success, #34d399); animation: os-chip-glow 2.2s ease-in-out infinite; }' +
   ' @media (prefers-reduced-motion: reduce) { .os-status-chip.os-chip-live, .os-status-chip.os-chip-live::after, .os-status-chip.os-chip-live .codicon { animation: none; } }'

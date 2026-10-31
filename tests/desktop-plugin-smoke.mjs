@@ -2480,6 +2480,8 @@ console.log('\n[Slice 1] Status bar chip — pure helpers, registration, click f
     'no running Crew ticket -> no radar class or attribute', JSON.stringify([c.idleCount, c.idleClass, c.idleRadar]))
   check(c.reducedMotion && c.reducedMotion.hasRule && c.reducedMotion.disablesAnimation && c.reducedMotion.coversLive,
     'prefers-reduced-motion: reduce disables the live radar animation', JSON.stringify(c.reducedMotion))
+  check(c.radarMask && c.radarMask.translucent && c.radarMask.exclude && !c.radarMask.opaque,
+    'status bar chip radar uses translucent content-box mask + exclude (interior fill), no opaque #000 content-box', JSON.stringify(c.radarMask))
   check(JSON.stringify(c.registeredClick) === JSON.stringify(['selectSource:src-chip', 'navigate:/openspec']),
     'registered click: selectSource then navigate(/openspec)', JSON.stringify(c.registeredClick))
   check(JSON.stringify(c.unregisteredClick) === JSON.stringify(['after-sync-click', 'addSource:/repos/chipapp', 'selectSource:src-new-1', 'navigate:/openspec']) ||
@@ -2688,6 +2690,8 @@ console.log('\n[Slice 3] Live Crew promotion, radar scanning, resizable drawers,
   check(k.betaRadar === null && !String(k.betaClass).includes('os-card-live') && !String(k.betaClass).includes('os-card-review'), 'Done-only change has no radar animation', JSON.stringify([k.betaRadar, k.betaClass]))
   check(String(k.alphaPills).includes('1 running'), 'BoardCard footer renders Crew status pill', JSON.stringify(k.alphaPills))
   check(source.includes('@property --os-arc') && source.includes('os-radar-spin'), 'Desktop plugin injects conic-gradient radar CSS')
+  check(source.includes('linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box, linear-gradient(#000 0 0)') && source.includes('content-box exclude') && !/linear-gradient\(#000 0 0\)\s*content-box/.test(source),
+    'Desktop plugin radar rules (.os-card-live/.os-card-review/.os-chip-live) use translucent content-box mask + exclude; no opaque content-box remains')
 
   check(JSON.stringify(k.clamp) === '[380,540,960,540,180,260,480,260]', 'clampDrawerWidth [380,960] and clampSpecsSidebarWidth [180,480] enforce bounds', JSON.stringify(k.clamp))
   check(k.ddWidth === '640px' && k.sashRole === 'separator' && k.sashOrient === 'vertical', 'DetailDrawer applies width prop and vertical separator sash', JSON.stringify([k.ddWidth, k.sashRole, k.sashOrient]))
@@ -2718,6 +2722,8 @@ console.log('\n[Slice 3] Live Crew promotion, radar scanning, resizable drawers,
   const foundCss = bannedCss.filter(tok => webCss.toLowerCase().includes(tok))
   check(foundCss.length === 0, 'dashboard/dist/style.css has zero hardcoded dark surface hex fallbacks', foundCss.join(', '))
   check(webCss.includes('@property --os-arc') && webCss.includes('.os-card-live::after'), 'dashboard/dist/style.css defines radar scanning animation')
+  check(webCss.includes('rgb(0 0 0 / 0.78) 0 0) content-box') && webCss.includes('content-box exclude') && !/linear-gradient\(#000 0 0\)\s*content-box/.test(webCss),
+    'dashboard/dist/style.css radar rule uses translucent content-box mask + exclude')
 
   // Web Slice 3 assertions
   const ws3 = (web && web.slice3) || {}

@@ -730,6 +730,7 @@ globalThis.__effects = globalThis.__effects || []
     idleClass: btn(idle.node) && btn(idle.node).props.className,
     idleRadar: btn(idle.node) && btn(idle.node).props['data-radar'],
     idleCount: countOf(idle.node),
+    radarMask: { translucent: cssText.includes('linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box'), exclude: cssText.includes('content-box exclude'), opaque: /linear-gradient\(#000 0 0\)\s*content-box/.test(cssText) },
     reducedMotion: rm ? { hasRule: true, disablesAnimation: /animation:\s*none/.test(rm[1]), coversLive: rm[1].indexOf('.os-status-chip.os-chip-live') >= 0 } : { hasRule: false },
     registeredClick: regLog.slice(),
     unregisteredClick: unLog.slice(),

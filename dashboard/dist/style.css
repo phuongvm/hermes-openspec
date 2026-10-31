@@ -402,8 +402,9 @@
 .os-card-live::after, .os-card-review::after {
   content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;
   background: conic-gradient(from var(--os-arc), transparent 0 68%, var(--os-radar-color) 88%, transparent 100%);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor; mask-composite: exclude;
+  -webkit-mask: linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box exclude, linear-gradient(#000 0 0);
 }
 .os-card-live::after { --os-radar-color: #34d399; animation: os-radar-spin 2.2s linear infinite; }
 .os-card-review::after { --os-radar-color: #f59e0b; animation: os-radar-spin 6s linear infinite; }
