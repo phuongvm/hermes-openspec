@@ -2482,6 +2482,10 @@ console.log('\n[Slice 1] Status bar chip — pure helpers, registration, click f
     'prefers-reduced-motion: reduce disables the live radar animation', JSON.stringify(c.reducedMotion))
   check(c.radarMask && c.radarMask.translucent && c.radarMask.exclude && !c.radarMask.opaque,
     'status bar chip radar uses translucent content-box mask + exclude (interior fill), no opaque #000 content-box', JSON.stringify(c.radarMask))
+  check(c.geometry && c.geometry.alignSelf && c.geometry.height && c.geometry.margin && c.geometry.boxSizing,
+    'status bar chip geometry: align-self center, height 16px, margin 0 2px, border-box', JSON.stringify(c.geometry))
+  check(c.geometry && c.geometry.baseRing && c.geometry.afterInset0,
+    'status bar chip radar: 4-sided inset 0 0 0 1px base ring and ::after inset: 0 (no -1px clipping)', JSON.stringify(c.geometry))
   check(JSON.stringify(c.registeredClick) === JSON.stringify(['selectSource:src-chip', 'navigate:/openspec']),
     'registered click: selectSource then navigate(/openspec)', JSON.stringify(c.registeredClick))
   check(JSON.stringify(c.unregisteredClick) === JSON.stringify(['after-sync-click', 'addSource:/repos/chipapp', 'selectSource:src-new-1', 'navigate:/openspec']) ||

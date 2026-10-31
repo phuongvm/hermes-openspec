@@ -731,6 +731,7 @@ globalThis.__effects = globalThis.__effects || []
     idleRadar: btn(idle.node) && btn(idle.node).props['data-radar'],
     idleCount: countOf(idle.node),
     radarMask: { translucent: cssText.includes('linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box'), exclude: cssText.includes('content-box exclude'), opaque: /linear-gradient\(#000 0 0\)\s*content-box/.test(cssText) },
+    geometry: (() => { const chipRule = (cssText.match(/\.os-status-chip \{([^}]*)\}/) || [])[1] || ''; const afterRule = (cssText.match(/\.os-status-chip\.os-chip-live::after \{([^}]*)\}/) || [])[1] || ''; return { alignSelf: chipRule.includes('align-self: center'), height: chipRule.includes('height: 16px'), margin: chipRule.includes('margin: 0 2px'), boxSizing: chipRule.includes('box-sizing: border-box'), baseRing: /\.os-status-chip\.os-chip-live \{[^}]*box-shadow: inset 0 0 0 1px/.test(cssText), afterInset0: /inset: 0;/.test(afterRule) && !afterRule.includes('inset: -1px') } })(),
     reducedMotion: rm ? { hasRule: true, disablesAnimation: /animation:\s*none/.test(rm[1]), coversLive: rm[1].indexOf('.os-status-chip.os-chip-live') >= 0 } : { hasRule: false },
     registeredClick: regLog.slice(),
     unregisteredClick: unLog.slice(),

@@ -2390,10 +2390,11 @@ function OpenSpecPage({ api, sessionStore, ctx }) {
 var CHIP_CSS = ' @property --os-chip-arc { syntax: "<angle>"; inherits: false; initial-value: 0deg; }' +
   ' @keyframes os-chip-spin { to { --os-chip-arc: 360deg; } }' +
   ' @keyframes os-chip-glow { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }' +
-  ' .os-status-chip { position: relative; display: flex; align-items: center; gap: 5px; border: 0; background: none; cursor: pointer; font-size: 11px; padding: 0 4px; border-radius: 4px; color: var(--ui-text-tertiary); }' +
+  ' .os-status-chip { position: relative; display: flex; align-items: center; gap: 5px; border: 0; background: none; cursor: pointer; font-size: 11px; align-self: center; height: 16px; margin: 0 2px; padding: 0 6px; box-sizing: border-box; line-height: 1; border-radius: 4px; color: var(--ui-text-tertiary); }' +
   ' .os-status-chip:hover { color: var(--ui-text-primary); }' +
   ' .os-status-chip b { font-weight: 600; color: var(--ui-accent, #60a5fa); }' +
-  ' .os-status-chip.os-chip-live::after { content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;' +
+  ' .os-status-chip.os-chip-live { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-success, #34d399) 28%, transparent); }' +
+  ' .os-status-chip.os-chip-live::after { content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none;' +
   ' background: conic-gradient(from var(--os-chip-arc), transparent 0 68%, var(--ui-success, #34d399) 88%, transparent 100%);' +
   ' -webkit-mask: linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(rgb(0 0 0 / 0.78) 0 0) content-box exclude, linear-gradient(#000 0 0);' +
   ' animation: os-chip-spin 2.2s linear infinite; }' +
