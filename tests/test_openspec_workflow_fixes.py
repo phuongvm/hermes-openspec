@@ -297,3 +297,76 @@ def test_openspec_context_reports_cross_kind_ambiguity(tmp_path, monkeypatch):
     assert result["error"] == "ambiguous"
     assert {c["kind"] for c in result["candidates"]} == {"change", "idea"}
     assert {c["ref"] for c in result["candidates"]} == {"change:same-artifact", "idea:same-artifact"}
+
+
+# ---------------------------------------------------------------------------
+# Code-enforced pre-archive gate & exploration packaging
+# ---------------------------------------------------------------------------
+
+
+def test_openspec_change_archive_refuses_unsynced_delta_specs(tmp_path):
+    ox = tmp_path / "openspec"
+    ch = ox / "changes" / "feat-a"
+    (ch / "specs" / "agent-tools").mkdir(parents=True)
+    (ch / "proposal.md").write_text("# Feat A\n", encoding="utf-8")
+    (ch / "tasks.md").write_text("- [x] 1.1 Done\n", encoding="utf-8")
+    (ch / "specs" / "agent-tools" / "spec.md").write_text(
+        "# Delta\n\n## ADDED Requirements\n\n### Requirement: Must Be Synced First\nText.\n",
+        encoding="utf-8",
+    )
+    (ox / "specs" / "agent-tools").mkdir(parents=True)
+    (ox / "specs" / "agent-tools" / "spec.md").write_text("# Agent Tools\n", encoding="utf-8")
+
+    res = json.loads(tools.openspec_change_archive({"workdir": str(tmp_path), "change": "feat-a"}))
+    assert res["ok"] is False
+    assert "unsynced_specs" in res
+    assert res["unsynced_specs"][0]["missing_requirements"] == ["Must Be Synced First"]
+    assert ch.is_dir()
+
+
+def test_openspec_change_archive_refuses_rejected_latest_review(tmp_path):
+    ox = tmp_path / "openspec"
+    ch = ox / "changes" / "feat-b"
+    (ch / "reviews").mkdir(parents=True)
+    (ch / "proposal.md").write_text("# Feat B\n", encoding="utf-8")
+    (ch / "tasks.md").write_text("- [x] 1.1 Done\n", encoding="utf-8")
+    (ch / "reviews" / "findings-proposal-v1.md").write_text("**Verdict: REJECTED**\n", encoding="utf-8")
+
+    res = json.loads(tools.openspec_change_archive({"workdir": str(tmp_path), "change": "feat-b"}))
+    assert res["ok"] is False
+    assert "REJECTED" in res["error"]
+    assert ch.is_dir()
+
+
+def test_openspec_change_archive_packages_workspace_exploration_and_passes_when_synced(tmp_path):
+    ox = tmp_path / "openspec"
+    exp = ox / "workspace" / "explorations" / "2026-11-02-feat-c-exploration.md"
+    exp.parent.mkdir(parents=True)
+    exp.write_text("# Exploration Feat C\n", encoding="utf-8")
+
+    ch = ox / "changes" / "feat-c"
+    (ch / "specs" / "agent-tools").mkdir(parents=True)
+    (ch / "reviews").mkdir(parents=True)
+    (ch / ".openspec.yaml").write_text(
+        "schema: spec-driven\nx-exploration: openspec/workspace/explorations/2026-11-02-feat-c-exploration.md\n",
+        encoding="utf-8",
+    )
+    (ch / "proposal.md").write_text("# Feat C\n", encoding="utf-8")
+    (ch / "tasks.md").write_text("- [x] 1.1 Done\n", encoding="utf-8")
+    (ch / "specs" / "agent-tools" / "spec.md").write_text(
+        "# Delta\n\n## ADDED Requirements\n\n### Requirement: Synced Cap\nText.\n",
+        encoding="utf-8",
+    )
+    (ch / "reviews" / "findings-proposal-v1.md").write_text("**Verdict: REJECTED**\n", encoding="utf-8")
+    (ch / "reviews" / "findings-apply-v2.md").write_text("**Verdict: APPROVED**\n", encoding="utf-8")
+
+    (ox / "specs" / "agent-tools").mkdir(parents=True)
+    (ox / "specs" / "agent-tools" / "spec.md").write_text(
+        "# Agent Tools\n\n### Requirement: Synced Cap\nText.\n",
+        encoding="utf-8",
+    )
+
+    res = json.loads(tools.openspec_change_archive({"workdir": str(tmp_path), "change": "feat-c"}))
+    assert res["ok"] is True
+    arch_exp = ox / "changes" / "archive" / "feat-c" / "explorations" / "2026-11-02-feat-c-exploration.md"
+    assert arch_exp.is_file()

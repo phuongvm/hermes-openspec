@@ -286,3 +286,19 @@ def test_adapters_contain_no_local_scanner_or_verdict_parser():
         assert "def extract_review_verdict" not in src and "def scan_explorations" not in src
         assert "def scan_reviews" not in src and "def _extract_verdict" not in src
         assert "artifacts_index" in src
+
+
+def test_review_scan_orders_by_round_across_prefixes(env):
+    demo = env["repo"] / "openspec" / "changes" / "demo" / "reviews"
+    _write(demo / "findings-proposal-v2.md", "- **Verdict**: **REJECTED**\n")
+    _write(demo / "findings-apply-v3.md", "- **Verdict**: **APPROVED**\n")
+
+    changes = {c["name"]: c for c in _sources(env)["openspec"]["changes"]}
+    assert changes["demo"]["latestVerdict"] == "APPROVED"
+    detail = env["client"].get(f"/sources/{env['sid']}/changes/demo").json()
+    assert [r["name"] for r in detail["reviews"]] == [
+        "findings-proposal-v1",
+        "findings-proposal-v2",
+        "findings-apply-v3",
+    ]
+    assert detail["reviews"][-1]["verdict"] == "APPROVED"

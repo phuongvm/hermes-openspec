@@ -1110,6 +1110,97 @@ def openspec_task_set_status(args: dict, **kwargs) -> str:
     })
 
 
+_REQ_HEADER_RE = re.compile(r"^###\s+Requirement:\s*(.+?)\s*$")
+_DELTA_SECTION_RE = re.compile(r"^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\b", re.IGNORECASE)
+_X_EXPLORATION_RE = re.compile(r"^\s*x-exploration\s*:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _extract_required_delta_headers(text: str) -> list[str]:
+    headers: list[str] = []
+    section = "ADDED"
+    for line in text.splitlines():
+        sec_match = _DELTA_SECTION_RE.match(line.strip())
+        if sec_match:
+            section = sec_match.group(1).upper()
+            continue
+        if section in ("REMOVED", "RENAMED"):
+            continue
+        req_match = _REQ_HEADER_RE.match(line.strip())
+        if req_match:
+            title = req_match.group(1).strip()
+            if title and title not in headers:
+                headers.append(title)
+    return headers
+
+
+def _check_delta_specs_synced(root: Path, change_dir: Path) -> list[dict[str, Any]]:
+    specs_dir = change_dir / "specs"
+    if not specs_dir.is_dir():
+        return []
+    unsynced: list[dict[str, Any]] = []
+    for delta_file in sorted(specs_dir.rglob("*.md")):
+        if not delta_file.is_file():
+            continue
+        delta_text = delta_file.read_text(encoding="utf-8", errors="replace")
+        if "#### Scenario: Placeholder refinement" in delta_text:
+            continue
+        required = _extract_required_delta_headers(delta_text)
+        if not required:
+            continue
+        rel = delta_file.relative_to(specs_dir).as_posix()
+        canonical_file = root / "openspec" / "specs" / rel
+        if not canonical_file.is_file():
+            unsynced.append({"spec": rel, "missing_requirements": required})
+            continue
+        canonical_titles = {
+            m.group(1).strip()
+            for line in canonical_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            if (m := _REQ_HEADER_RE.match(line.strip()))
+        }
+        missing = [req for req in required if req not in canonical_titles]
+        if missing:
+            unsynced.append({"spec": rel, "missing_requirements": missing})
+    return unsynced
+
+
+def _check_reviews_approved(change_dir: Path, change: str) -> str | None:
+    reviews = _artifacts_index.scan_reviews(change_dir, change, lambda s: s)
+    if reviews and reviews[-1].get("verdict") == "REJECTED":
+        return f"cannot archive change '{change}': latest review ({reviews[-1].get('filename')}) has verdict REJECTED"
+    return None
+
+
+def _package_change_explorations(root: Path, change_dir: Path, change: str) -> list[str]:
+    ws_exp_dir = root / "openspec" / "workspace" / "explorations"
+    if not ws_exp_dir.is_dir():
+        return []
+    candidates: list[str] = []
+    meta_path = change_dir / ".openspec.yaml"
+    if meta_path.is_file():
+        meta_text = meta_path.read_text(encoding="utf-8", errors="replace")
+        for m in _X_EXPLORATION_RE.finditer(meta_text):
+            raw = m.group(1).strip().strip("\"'").replace("\\", "/")
+            fname = Path(raw).name
+            if fname.endswith(".md") and fname not in candidates:
+                candidates.append(fname)
+    proposal_path = change_dir / "proposal.md"
+    if proposal_path.is_file():
+        refs = _artifacts_index.extract_openspec_refs(proposal_path.read_text(encoding="utf-8", errors="replace"))
+        for scope, fname in sorted(refs.get("explorations", set())):
+            if scope == "workspace" and fname not in candidates:
+                candidates.append(fname)
+    packaged: list[str] = []
+    target_dir = change_dir / "explorations"
+    for fname in candidates:
+        src = ws_exp_dir / fname
+        dst = target_dir / fname
+        if src.is_file() and not dst.is_file():
+            target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(dst))
+            packaged.append(fname)
+    return packaged
+
+
 def openspec_change_archive(args: dict, **kwargs) -> str:
     root, err, _context = _resolve_project(args)
     if err or root is None:
@@ -1124,10 +1215,22 @@ def openspec_change_archive(args: dict, **kwargs) -> str:
     status = _derive_status(tasks_path)
     if status != "done" and not args.get("force"):
         return _error(f"change is not complete: {change}", status=status)
+    if not args.get("force"):
+        review_err = _check_reviews_approved(change_dir, change)
+        if review_err:
+            return _error(review_err, change=change)
+        unsynced = _check_delta_specs_synced(root, change_dir)
+        if unsynced:
+            return _error(
+                f"delta specs not synced to canonical specs for change: {change}. Run openspec-sync-specs first.",
+                change=change,
+                unsynced_specs=unsynced,
+            )
     archive_dir = _change_path(root, change, archived=True)
     archive_dir.parent.mkdir(parents=True, exist_ok=True)
     if archive_dir.exists() and not args.get("force"):
         return _error(f"archived change already exists: {change}")
+    packaged = _package_change_explorations(root, change_dir, change)
     if archive_dir.exists():
         shutil.rmtree(archive_dir)
     shutil.move(str(change_dir), str(archive_dir))
@@ -1137,6 +1240,7 @@ def openspec_change_archive(args: dict, **kwargs) -> str:
         "status": "archived",
         "archived_path": str(archive_dir),
         "relative_archived_path": _relative(archive_dir, root),
+        "packaged_explorations": packaged,
         "workdir": str(root),
     })
 

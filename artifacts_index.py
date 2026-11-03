@@ -33,7 +33,14 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _TOKEN_RE = re.compile(r"^os_[0-9a-fA-F]{6}$")
 _KINDS = ("change", "spec", "idea", "exploration", "review")
 _DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-(?P<bare>[A-Za-z0-9._-]+)$")
 _ROUND_RE = re.compile(r"(?:^|[-_])(?:v|round[-_]?)(\d+)$", re.IGNORECASE)
+
+
+def strip_date_prefix(name: Any) -> str:
+    raw = str(name or "").strip()
+    match = _DATE_PREFIX_RE.match(raw)
+    return match.group("bare") if match else raw
 _VERDICT_LINE_RE = re.compile(
     r"^\s*(?:[-*+]\s+)?(?:#{1,6}\s*)?\**\s*verdict[\s*]*:[\s*]*(?P<v>[A-Za-z]+)",
     re.IGNORECASE,
@@ -206,7 +213,9 @@ def scan_explorations(
 
 
 def _review_sort_key(path: Path) -> tuple[Any, ...]:
-    return tuple(int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name))
+    rnd = parse_round(path.stem)
+    natural = tuple(int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name))
+    return (1 if rnd is not None else 0, rnd or 0, natural)
 
 
 def scan_reviews(change_dir: Path | str, change_name: str, token_for: TokenFor) -> list[dict[str, Any]]:
@@ -426,6 +435,9 @@ def extract_openspec_refs(text: Any) -> dict[str, set]:
         if not name or name == "archive":
             continue
         refs["changes"].add(name)
+        bare = strip_date_prefix(name)
+        if bare and bare != name:
+            refs["changes"].add(bare)
         sub, filename = match.group("sub"), match.group("file")
         if sub == "explorations" and filename:
             refs["explorations"].add((f"change:{name}", filename))

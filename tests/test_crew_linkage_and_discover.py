@@ -124,6 +124,18 @@ def test_archived_change_path_links(env):
     assert [c["id"] for c in _cards_for_change(env, "2026-01-01-old")] == ["t_ddd444"]
 
 
+def test_date_prefixed_archived_change_links_active_change_path_and_token(env):
+    bare_token = registry.change_token("old")
+    _make_kanban(env["home"] / "kanban.db", [
+        {"id": "t_act_path", "body": "Inputs: openspec/changes/old/proposal.md", "status": "done"},
+        {"id": "t_act_tok", "title": f"Review {bare_token}", "status": "done"},
+    ])
+    assert [c["id"] for c in _cards_for_change(env, "2026-01-01-old")] == ["t_act_path", "t_act_tok"]
+    detail = env["client"].get(f"/sources/{env['sid']}/changes/2026-01-01-old").json()
+    assert [c["id"] for c in detail["crewCards"]] == ["t_act_path", "t_act_tok"]
+
+
+
 def test_exploration_links_only_by_full_relative_path(env):
     _make_kanban(env["home"] / "kanban.db", [
         {"id": "t_ws1", "body": "Inputs: openspec/workspace/explorations/2026-10-30-topic.md"},

@@ -391,7 +391,18 @@ class _CrewLinker:
         return out
 
     def for_change(self, name: str, token: str) -> list[dict[str, Any]]:
-        return self._collect(lambda refs: name in refs["changes"] or token in refs["tokens"])
+        bare = (
+            _artifacts.strip_date_prefix(name)
+            if (_artifacts is not None and hasattr(_artifacts, "strip_date_prefix"))
+            else name
+        )
+        bare_token = _change_token(bare) if bare != name else token
+        return self._collect(
+            lambda refs: name in refs["changes"]
+            or bare in refs["changes"]
+            or token in refs["tokens"]
+            or bare_token in refs["tokens"]
+        )
 
     def for_exploration(self, scope: str, filename: str, token: str) -> list[dict[str, Any]]:
         return self._collect(
