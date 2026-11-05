@@ -368,5 +368,7 @@ def test_openspec_change_archive_packages_workspace_exploration_and_passes_when_
 
     res = json.loads(tools.openspec_change_archive({"workdir": str(tmp_path), "change": "feat-c"}))
     assert res["ok"] is True
-    arch_exp = ox / "changes" / "archive" / "feat-c" / "explorations" / "2026-11-02-feat-c-exploration.md"
+    arch_dir = Path(res["archived_path"])
+    assert arch_dir.name == "2026-11-02-feat-c"
+    arch_exp = arch_dir / "explorations" / "2026-11-02-feat-c-exploration.md"
     assert arch_exp.is_file()

@@ -227,15 +227,21 @@ def test_change_archive_refuses_incomplete_tasks_then_unarchive_restores_active_
         "tasks": ["1.1"],
         "status": "done",
     }))
+    reviews_dir = tmp_path / "openspec" / "changes" / "archive-me" / "reviews"
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+    (reviews_dir / "findings-verify-v1.md").write_text("Verdict: APPROVED\n", encoding="utf-8")
+
     archived = parse(tools.openspec_change_archive({"workdir": str(tmp_path), "change": "archive-me"}))
     assert archived["ok"] is True
     assert not (tmp_path / "openspec" / "changes" / "archive-me").exists()
-    assert (tmp_path / "openspec" / "changes" / "archive" / "archive-me").is_dir()
+    arch_dir = Path(archived["archived_path"])
+    assert arch_dir.is_dir()
+    assert arch_dir.name.endswith("-archive-me")
 
     unarchived = parse(tools.openspec_change_unarchive({"workdir": str(tmp_path), "change": "archive-me"}))
     assert unarchived["ok"] is True
     assert (tmp_path / "openspec" / "changes" / "archive-me").is_dir()
-    assert not (tmp_path / "openspec" / "changes" / "archive" / "archive-me").exists()
+    assert not arch_dir.exists()
 
 
 def test_generated_scaffolds_validate_with_openspec_cli(tmp_path):

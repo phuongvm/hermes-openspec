@@ -488,9 +488,21 @@ def _resolve_change_path(root: Path, change_ref: str) -> tuple[Path | None, bool
     active = _change_path(root, change)
     if active.is_dir():
         return active, False
+    bare = _artifacts_index.strip_date_prefix(change)
+    if bare and bare != change:
+        active_bare = _change_path(root, bare)
+        if active_bare.is_dir():
+            return active_bare, False
     archived = _change_path(root, change, archived=True)
     if archived.is_dir():
         return archived, True
+    archive_root = root / "openspec" / "changes" / "archive"
+    if archive_root.is_dir():
+        for child in sorted(archive_root.iterdir()):
+            if child.is_dir() and (
+                child.name == change or _artifacts_index.strip_date_prefix(child.name) in {change, bare}
+            ):
+                return child, True
     return None, False
 
 
@@ -1111,8 +1123,14 @@ def openspec_task_set_status(args: dict, **kwargs) -> str:
 
 
 _REQ_HEADER_RE = re.compile(r"^###\s+Requirement:\s*(.+?)\s*$")
+_SCENARIO_HEADER_RE = re.compile(r"^####\s+Scenario:\s*(.+?)\s*$")
+_SCENARIO_TAG_RE = re.compile(r"\((?:MODIFIED|ADDED|REMOVED|RENAMED)\)", re.IGNORECASE)
 _DELTA_SECTION_RE = re.compile(r"^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\b", re.IGNORECASE)
 _X_EXPLORATION_RE = re.compile(r"^\s*x-exploration\s*:\s*(.+?)\s*$", re.MULTILINE)
+_X_CREATED_AT_RE = re.compile(r"^\s*x-createdAt\s*:\s*[\"']?(\d{4}-\d{2}-\d{2})", re.MULTILINE)
+_RAW_ARCHIVE_BLOCK_MESSAGE = (
+    "Raw openspec archive is forbidden; use openspec_change_archive after Commander approval."
+)
 
 
 def _extract_required_delta_headers(text: str) -> list[str]:
@@ -1133,6 +1151,223 @@ def _extract_required_delta_headers(text: str) -> list[str]:
     return headers
 
 
+def _parse_requirement_blocks(md_text: str, *, is_delta: bool = False) -> dict[str, Any]:
+    """Parse markdown into title, purpose, and sectioned requirement blocks."""
+    lines = md_text.splitlines()
+    title = ""
+    purpose_lines: list[str] = []
+    mode = "header"
+    current_section = "ADDED" if is_delta else "CANONICAL"
+    blocks: list[dict[str, Any]] = []
+    current_block: dict[str, Any] | None = None
+
+    def _flush():
+        nonlocal current_block
+        if current_block is not None:
+            raw_lines = list(current_block["lines"])
+            while raw_lines and raw_lines[-1].strip() in ("", "---"):
+                raw_lines.pop()
+            current_block["lines"] = raw_lines
+            blocks.append(current_block)
+            current_block = None
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            if not title:
+                title = stripped[2:].strip()
+            continue
+        if stripped.lower().startswith("## purpose"):
+            _flush()
+            mode = "purpose"
+            continue
+        sec_m = _DELTA_SECTION_RE.match(stripped)
+        if sec_m:
+            _flush()
+            current_section = sec_m.group(1).upper()
+            mode = "reqs"
+            continue
+        if stripped.lower().startswith("## requirements"):
+            _flush()
+            current_section = "CANONICAL"
+            mode = "reqs"
+            continue
+        req_m = _REQ_HEADER_RE.match(stripped)
+        if req_m:
+            _flush()
+            mode = "reqs"
+            current_block = {
+                "name": req_m.group(1).strip(),
+                "section": current_section,
+                "lines": [f"### Requirement: {req_m.group(1).strip()}"],
+                "scenarios": [],
+                "has_scenario_tags": False,
+            }
+            continue
+        if mode == "purpose":
+            purpose_lines.append(line)
+        elif current_block is not None:
+            scn_m = _SCENARIO_HEADER_RE.match(stripped)
+            if scn_m:
+                scn_name = scn_m.group(1).strip()
+                current_block["scenarios"].append(scn_name)
+                if _SCENARIO_TAG_RE.search(scn_name):
+                    current_block["has_scenario_tags"] = True
+            current_block["lines"].append(line)
+
+    _flush()
+    while purpose_lines and not purpose_lines[0].strip():
+        purpose_lines.pop(0)
+    while purpose_lines and not purpose_lines[-1].strip():
+        purpose_lines.pop()
+    return {
+        "title": title,
+        "purpose": "\n".join(purpose_lines),
+        "blocks": blocks,
+    }
+
+
+def openspec_sync_specs(args: dict, **kwargs) -> str:
+    """Deterministically merge delta specs from changes/<change>/specs/ into openspec/specs/."""
+    root, err, _context = _resolve_project(args)
+    if err or root is None:
+        return _error(err or "workdir could not be resolved")
+    change = _slugify(str(args.get("change") or args.get("change_id") or ""), fallback="")
+    if not change:
+        return _error("change is required")
+    dry_run = bool(args.get("dry_run"))
+    change_dir, archived = _resolve_change_path(root, change)
+    if change_dir is None or archived:
+        return _error(f"active change not found: {change}")
+    specs_dir = change_dir / "specs"
+    if not specs_dir.is_dir():
+        return json.dumps({
+            "ok": True,
+            "change": change,
+            "dry_run": dry_run,
+            "synced_specs": [],
+            "workdir": str(root),
+        })
+
+    delta_files = [p for p in sorted(specs_dir.rglob("*.md")) if p.is_file()]
+    merge_plan: list[tuple[str, Path, str, dict[str, int]]] = []
+
+    for delta_file in delta_files:
+        delta_text = delta_file.read_text(encoding="utf-8", errors="replace")
+        if "#### Scenario: Placeholder refinement" in delta_text:
+            continue
+        rel = delta_file.relative_to(specs_dir).as_posix()
+        canonical_file = root / "openspec" / "specs" / rel
+        delta_parsed = _parse_requirement_blocks(delta_text, is_delta=True)
+        if not delta_parsed["blocks"]:
+            continue
+
+        if canonical_file.is_file():
+            canon_text = canonical_file.read_text(encoding="utf-8", errors="replace")
+            canon_parsed = _parse_requirement_blocks(canon_text, is_delta=False)
+        else:
+            canon_parsed = {"title": "", "purpose": "", "blocks": []}
+
+        canon_by_name: dict[str, dict[str, Any]] = {
+            b["name"]: b for b in canon_parsed["blocks"]
+        }
+        ordered_names: list[str] = [b["name"] for b in canon_parsed["blocks"]]
+
+        # Pre-Merge Safety Gate: check MODIFIED scenario counts
+        for dblock in delta_parsed["blocks"]:
+            if dblock["section"] != "MODIFIED":
+                continue
+            existing = canon_by_name.get(dblock["name"])
+            if existing is None:
+                continue
+            n_canon = len(existing["scenarios"])
+            n_delta = len(dblock["scenarios"])
+            if n_delta < n_canon and not dblock["has_scenario_tags"]:
+                return _error(
+                    f"⛔ UNSAFE MERGE BLOCKED: {rel} requirement '{dblock['name']}' has {n_canon} scenarios, "
+                    f"but delta has {n_delta} without tags. Fix: Add (MODIFIED) tag to scenario headers.",
+                    change=change,
+                    spec=rel,
+                    requirement=dblock["name"],
+                    canonical_scenarios=n_canon,
+                    delta_scenarios=n_delta,
+                )
+
+        counts = {"added": 0, "modified": 0, "removed": 0}
+        for dblock in delta_parsed["blocks"]:
+            sec = dblock["section"]
+            rname = dblock["name"]
+            cleaned_lines = [
+                _SCENARIO_TAG_RE.sub("", ln).rstrip() if _SCENARIO_HEADER_RE.match(ln.strip()) else ln
+                for ln in dblock["lines"]
+            ]
+            if sec == "REMOVED":
+                if rname in canon_by_name:
+                    del canon_by_name[rname]
+                    ordered_names = [n for n in ordered_names if n != rname]
+                    counts["removed"] += 1
+            elif sec in ("ADDED", "MODIFIED"):
+                new_entry = {
+                    "name": rname,
+                    "section": "CANONICAL",
+                    "lines": cleaned_lines,
+                    "scenarios": list(dblock["scenarios"]),
+                    "has_scenario_tags": False,
+                }
+                if rname in canon_by_name:
+                    canon_by_name[rname] = new_entry
+                    if sec == "MODIFIED":
+                        counts["modified"] += 1
+                    else:
+                        counts["added"] += 1
+                else:
+                    canon_by_name[rname] = new_entry
+                    ordered_names.append(rname)
+                    if sec == "MODIFIED":
+                        counts["modified"] += 1
+                    else:
+                        counts["added"] += 1
+
+        raw_title = canon_parsed["title"] or delta_parsed["title"] or Path(rel).parent.name.replace("-", " ").title()
+        if raw_title.lower().startswith("spec delta:"):
+            raw_title = raw_title.split(":", 1)[1].strip()
+        if not raw_title.lower().endswith("specification"):
+            header_title = f"# {raw_title} Specification"
+        else:
+            header_title = f"# {raw_title}"
+
+        purpose_text = canon_parsed["purpose"] or delta_parsed["purpose"]
+        out_parts = [header_title, ""]
+        if purpose_text:
+            out_parts.extend(["## Purpose", "", purpose_text, ""])
+        out_parts.extend(["## Requirements", ""])
+        for idx, rname in enumerate(ordered_names):
+            blk = canon_by_name[rname]
+            out_parts.extend(blk["lines"])
+            out_parts.append("")
+        rendered = "\n".join(out_parts).rstrip() + "\n"
+        merge_plan.append((rel, canonical_file, rendered, counts))
+
+    synced_specs: list[dict[str, Any]] = []
+    for rel, canonical_file, rendered, counts in merge_plan:
+        if not dry_run:
+            canonical_file.parent.mkdir(parents=True, exist_ok=True)
+            canonical_file.write_text(rendered, encoding="utf-8")
+        synced_specs.append({
+            "spec": rel,
+            "path": _relative(canonical_file, root),
+            "counts": counts,
+        })
+
+    return json.dumps({
+        "ok": True,
+        "change": change,
+        "dry_run": dry_run,
+        "synced_specs": synced_specs,
+        "workdir": str(root),
+    })
+
+
 def _check_delta_specs_synced(root: Path, change_dir: Path) -> list[dict[str, Any]]:
     specs_dir = change_dir / "specs"
     if not specs_dir.is_dir():
@@ -1145,12 +1380,24 @@ def _check_delta_specs_synced(root: Path, change_dir: Path) -> list[dict[str, An
         if "#### Scenario: Placeholder refinement" in delta_text:
             continue
         required = _extract_required_delta_headers(delta_text)
-        if not required:
+        removed: list[str] = []
+        sec = "ADDED"
+        for line in delta_text.splitlines():
+            sm = _DELTA_SECTION_RE.match(line.strip())
+            if sm:
+                sec = sm.group(1).upper()
+                continue
+            if sec == "REMOVED":
+                rm = _REQ_HEADER_RE.match(line.strip())
+                if rm and rm.group(1).strip() not in removed:
+                    removed.append(rm.group(1).strip())
+        if not required and not removed:
             continue
         rel = delta_file.relative_to(specs_dir).as_posix()
         canonical_file = root / "openspec" / "specs" / rel
         if not canonical_file.is_file():
-            unsynced.append({"spec": rel, "missing_requirements": required})
+            if required:
+                unsynced.append({"spec": rel, "missing_requirements": required})
             continue
         canonical_titles = {
             m.group(1).strip()
@@ -1158,22 +1405,17 @@ def _check_delta_specs_synced(root: Path, change_dir: Path) -> list[dict[str, An
             if (m := _REQ_HEADER_RE.match(line.strip()))
         }
         missing = [req for req in required if req not in canonical_titles]
-        if missing:
-            unsynced.append({"spec": rel, "missing_requirements": missing})
+        still_present = [req for req in removed if req in canonical_titles]
+        if missing or still_present:
+            entry: dict[str, Any] = {"spec": rel, "missing_requirements": missing}
+            if still_present:
+                entry["unremoved_requirements"] = still_present
+            unsynced.append(entry)
     return unsynced
-
-
-def _check_reviews_approved(change_dir: Path, change: str) -> str | None:
-    reviews = _artifacts_index.scan_reviews(change_dir, change, lambda s: s)
-    if reviews and reviews[-1].get("verdict") == "REJECTED":
-        return f"cannot archive change '{change}': latest review ({reviews[-1].get('filename')}) has verdict REJECTED"
-    return None
 
 
 def _package_change_explorations(root: Path, change_dir: Path, change: str) -> list[str]:
     ws_exp_dir = root / "openspec" / "workspace" / "explorations"
-    if not ws_exp_dir.is_dir():
-        return []
     candidates: list[str] = []
     meta_path = change_dir / ".openspec.yaml"
     if meta_path.is_file():
@@ -1189,22 +1431,108 @@ def _package_change_explorations(root: Path, change_dir: Path, change: str) -> l
         for scope, fname in sorted(refs.get("explorations", set())):
             if scope == "workspace" and fname not in candidates:
                 candidates.append(fname)
+    if ws_exp_dir.is_dir():
+        bare = _artifacts_index.strip_date_prefix(change)
+        for p in sorted(ws_exp_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() == ".md":
+                if (change in p.stem or (bare and bare in p.stem)) and p.name not in candidates:
+                    candidates.append(p.name)
     packaged: list[str] = []
     target_dir = change_dir / "explorations"
-    for fname in candidates:
-        src = ws_exp_dir / fname
-        dst = target_dir / fname
-        if src.is_file() and not dst.is_file():
-            target_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(dst))
-            packaged.append(fname)
+    if ws_exp_dir.is_dir():
+        for fname in candidates:
+            src = ws_exp_dir / fname
+            dst = target_dir / fname
+            if src.is_file() and not dst.is_file():
+                target_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+                packaged.append(fname)
     return packaged
+
+
+def _resolve_archive_folder_name(change_dir: Path, change: str) -> str:
+    if _artifacts_index._DATE_PREFIX_RE.match(change):
+        return change
+    meta_path = change_dir / ".openspec.yaml"
+    if meta_path.is_file():
+        m = _X_CREATED_AT_RE.search(meta_path.read_text(encoding="utf-8", errors="replace"))
+        if m:
+            return f"{m.group(1)}-{change}"
+    for exp_file in _artifacts_index._md_files(change_dir / "explorations"):
+        dm = _artifacts_index._DATE_RE.match(exp_file.stem)
+        if dm:
+            return f"{dm.group(1)}-{change}"
+    today = datetime.now(timezone.utc).date().isoformat()
+    return f"{today}-{change}"
+
+
+def _archive_linked_kanban_cards(root: Path, change: str) -> list[str]:
+    import sqlite3
+
+    bare = _artifacts_index.strip_date_prefix(change)
+    target_names = {change, bare} - {""}
+    registry = _registry_module()
+    target_tokens: set[str] = set()
+    if registry is not None and hasattr(registry, "change_token"):
+        for nm in target_names:
+            try:
+                target_tokens.add(str(registry.change_token(nm)).lower())
+            except Exception:
+                pass
+
+    db_paths: list[Path] = []
+    for candidate_home in [
+        Path(os.environ["HERMES_HOME"]) if os.environ.get("HERMES_HOME") else None,
+        root,
+    ]:
+        if candidate_home is None or not candidate_home.is_dir():
+            continue
+        if (candidate_home / "kanban.db").is_file():
+            db_paths.append(candidate_home / "kanban.db")
+        boards_dir = candidate_home / "kanban" / "boards"
+        if boards_dir.is_dir():
+            for board in sorted(boards_dir.iterdir()):
+                if board.is_dir() and (board / "kanban.db").is_file():
+                    db_paths.append(board / "kanban.db")
+
+    archived_ids: list[str] = []
+    seen_dbs: set[str] = set()
+    for db_path in db_paths:
+        resolved = str(db_path.resolve())
+        if resolved in seen_dbs:
+            continue
+        seen_dbs.add(resolved)
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=5.0)
+            with conn:
+                rows = conn.execute(
+                    "SELECT id, title, status, body FROM tasks WHERE status = 'done'"
+                ).fetchall()
+                to_archive: list[str] = []
+                for row_id, title, _status, body in rows:
+                    refs = _artifacts_index.extract_openspec_refs(f"{title or ''}\n{body or ''}")
+                    if (refs["changes"] & target_names) or (
+                        target_tokens and ({t.lower() for t in refs["tokens"]} & target_tokens)
+                    ):
+                        to_archive.append(str(row_id))
+                for card_id in to_archive:
+                    conn.execute("UPDATE tasks SET status = 'archived' WHERE id = ?", (card_id,))
+                    if card_id not in archived_ids:
+                        archived_ids.append(card_id)
+            conn.close()
+        except Exception:
+            continue
+    return archived_ids
 
 
 def openspec_change_archive(args: dict, **kwargs) -> str:
     root, err, _context = _resolve_project(args)
     if err or root is None:
         return _error(err or "workdir could not be resolved")
+    if args.get("force"):
+        return _error(
+            "force bypass is forbidden on openspec_change_archive; task, review, exploration, and spec-sync gates are non-bypassable."
+        )
     change = _slugify(str(args.get("change") or args.get("change_id") or ""), fallback="")
     if not change:
         return _error("change is required")
@@ -1213,34 +1541,77 @@ def openspec_change_archive(args: dict, **kwargs) -> str:
         return _error(f"active change not found: {change}")
     tasks_path = change_dir / "tasks.md"
     status = _derive_status(tasks_path)
-    if status != "done" and not args.get("force"):
+    if status != "done":
         return _error(f"change is not complete: {change}", status=status)
-    if not args.get("force"):
-        review_err = _check_reviews_approved(change_dir, change)
-        if review_err:
-            return _error(review_err, change=change)
-        unsynced = _check_delta_specs_synced(root, change_dir)
-        if unsynced:
-            return _error(
-                f"delta specs not synced to canonical specs for change: {change}. Run openspec-sync-specs first.",
-                change=change,
-                unsynced_specs=unsynced,
-            )
-    archive_dir = _change_path(root, change, archived=True)
-    archive_dir.parent.mkdir(parents=True, exist_ok=True)
-    if archive_dir.exists() and not args.get("force"):
-        return _error(f"archived change already exists: {change}")
+
+    unsynced = _check_delta_specs_synced(root, change_dir)
+    if unsynced:
+        return _error(
+            f"delta specs not synced to canonical specs for change: {change}. Run openspec_sync_specs first.",
+            change=change,
+            unsynced_specs=unsynced,
+        )
+
     packaged = _package_change_explorations(root, change_dir, change)
+    # If no exploration file exists yet in change_dir/explorations and no workspace exploration
+    # was pending for this change, synthesize a minimal packaged exploration receipt so legacy
+    # changes without workspace explorations remain archivable once reviews + specs + tasks pass.
+    ws_exp_dir = root / "openspec" / "workspace" / "explorations"
+    has_unawaited_ws_exp = False
+    if ws_exp_dir.is_dir():
+        bare = _artifacts_index.strip_date_prefix(change)
+        has_unawaited_ws_exp = any(
+            p.is_file() and p.suffix.lower() == ".md" and (change in p.stem or (bare and bare in p.stem))
+            for p in ws_exp_dir.iterdir()
+        )
+    if not _artifacts_index._md_files(change_dir / "explorations") and not has_unawaited_ws_exp:
+        meta_path = change_dir / ".openspec.yaml"
+        has_x_exp = bool(
+            meta_path.is_file()
+            and _X_EXPLORATION_RE.search(meta_path.read_text(encoding="utf-8", errors="replace"))
+        )
+        if not has_x_exp:
+            exp_dir = change_dir / "explorations"
+            exp_dir.mkdir(parents=True, exist_ok=True)
+            auto_exp = exp_dir / f"{change}-exploration.md"
+            proposal_txt = _read_doc(change_dir / "proposal.md") or f"# {change}\n"
+            auto_exp.write_text(proposal_txt, encoding="utf-8")
+            packaged.append(auto_exp.name)
+
+    gate_res = _artifacts_index.evaluate_change_gate(root, change, "archive")
+    if not gate_res["allowed"] or gate_res["latest_verdict"] != "APPROVED":
+        return _error(
+            f"cannot archive change '{change}': archive gate failed "
+            f"(latest_verdict={gate_res['latest_verdict']}, missing={gate_res['missing']})",
+            change=change,
+            gate=gate_res,
+        )
+
+    archive_folder_name = _resolve_archive_folder_name(change_dir, change)
+    archive_dir = _change_path(root, archive_folder_name, archived=True)
+    archive_dir.parent.mkdir(parents=True, exist_ok=True)
     if archive_dir.exists():
-        shutil.rmtree(archive_dir)
+        return _error(f"archived change already exists: {archive_folder_name}", change=change)
+
     shutil.move(str(change_dir), str(archive_dir))
+    archived_cards = _archive_linked_kanban_cards(root, change)
+    date_prefix = archive_folder_name[:10]
+    post_archive_obligations = {
+        "post_archive_sync_required": True,
+        "audit_report_path": f"openspec/workspace/audits/{date_prefix}/{change}-audit.md",
+        "archived_kanban_cards": archived_cards,
+        "architecture_doc_check": "docs/architecture.md",
+    }
     return json.dumps({
         "ok": True,
         "change": change,
+        "archive_name": archive_folder_name,
         "status": "archived",
         "archived_path": str(archive_dir),
         "relative_archived_path": _relative(archive_dir, root),
         "packaged_explorations": packaged,
+        "archived_kanban_cards": archived_cards,
+        "post_archive_obligations": post_archive_obligations,
         "workdir": str(root),
     })
 
@@ -1252,12 +1623,22 @@ def openspec_change_unarchive(args: dict, **kwargs) -> str:
     change = _slugify(str(args.get("change") or args.get("change_id") or ""), fallback="")
     if not change:
         return _error("change is required")
+    bare = _artifacts_index.strip_date_prefix(change)
     archive_dir = _change_path(root, change, archived=True)
-    active_dir = _change_path(root, change)
+    if not archive_dir.is_dir():
+        archive_root = root / "openspec" / "changes" / "archive"
+        if archive_root.is_dir():
+            for child in sorted(archive_root.iterdir()):
+                if child.is_dir() and (
+                    child.name == change or _artifacts_index.strip_date_prefix(child.name) in {change, bare}
+                ):
+                    archive_dir = child
+                    break
+    active_dir = _change_path(root, bare or change)
     if not archive_dir.is_dir():
         return _error(f"archived change not found: {change}")
     if active_dir.exists() and not args.get("force"):
-        return _error(f"active change already exists: {change}")
+        return _error(f"active change already exists: {bare or change}")
     if active_dir.exists():
         shutil.rmtree(active_dir)
     shutil.move(str(archive_dir), str(active_dir))
@@ -1645,6 +2026,246 @@ def openspec_spec_list(args: dict, **kwargs) -> str:
     })
 
 
+def _normalize_exe_name(token: str) -> str:
+    cleaned = str(token or "").strip().strip("\"'").replace("\\", "/")
+    if not cleaned:
+        return ""
+    base = cleaned.rsplit("/", 1)[-1].lower()
+    for ext in (".exe", ".cmd", ".bat", ".ps1", ".sh"):
+        if base.endswith(ext):
+            base = base[: -len(ext)]
+            break
+    return base
+
+
+def _first_openspec_subcommand(tokens: list[str]) -> str:
+    idx = 0
+    while idx < len(tokens):
+        tok = str(tokens[idx] or "").strip().strip("\"'")
+        if not tok:
+            idx += 1
+            continue
+        if tok in {"-C", "--workdir", "--schema", "--Config"}:
+            idx += 2
+            continue
+        if tok.startswith("-"):
+            idx += 1
+            continue
+        return tok.lower()
+    return ""
+
+
+def _tokens_invoke_openspec_archive(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    idx = 0
+    while idx < len(tokens):
+        raw = str(tokens[idx] or "").strip()
+        if not raw or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", raw):
+            idx += 1
+            continue
+        exe = _normalize_exe_name(raw)
+        if exe in {"env", "nohup", "sudo", "command", "builtin", "time"}:
+            idx += 1
+            continue
+        if exe == "npx":
+            idx += 1
+            while idx < len(tokens) and str(tokens[idx]).startswith("-"):
+                idx += 1
+            if idx < len(tokens) and _normalize_exe_name(tokens[idx]) == "openspec":
+                sub = _first_openspec_subcommand(tokens[idx + 1 :])
+                return sub in {"archive", "bulk-archive"}
+            return False
+        if exe in {"bash", "sh", "zsh", "dash", "cmd", "pwsh", "powershell"}:
+            # Unwrap inline shell -c / /c command strings
+            for sub_tok in tokens[idx + 1 :]:
+                cleaned_sub = str(sub_tok).strip()
+                if len(cleaned_sub) >= 2 and cleaned_sub[0] == cleaned_sub[-1] and cleaned_sub[0] in "\"'":
+                    cleaned_sub = cleaned_sub[1:-1]
+                if _is_raw_openspec_archive_command(cleaned_sub):
+                    return True
+            return False
+        if exe.startswith("python"):
+            rest_joined = " ".join(str(t) for t in tokens[idx + 1 :])
+            if _is_raw_openspec_archive_code(rest_joined):
+                return True
+            return False
+        if exe == "openspec":
+            sub = _first_openspec_subcommand(tokens[idx + 1 :])
+            return sub in {"archive", "bulk-archive"}
+        return False
+    return False
+
+
+_SHELL_SPLIT_RE = re.compile(r"(?:&&|\|\||;|\||\r?\n)+")
+_SUBSHELL_RE = re.compile(r"\$\(([^)]+)\)|`([^`]+)`")
+
+
+def _split_shell_tokens(segment: str) -> list[str]:
+    import shlex
+
+    normalized = segment.replace("\\", "/")
+    try:
+        return shlex.split(normalized, posix=True)
+    except ValueError:
+        return [t.strip("\"'") for t in segment.split() if t.strip()]
+
+
+def _is_raw_openspec_archive_command(command: str) -> bool:
+    text = str(command or "").strip()
+    if not text:
+        return False
+    for m in _SUBSHELL_RE.finditer(text):
+        inner = m.group(1) or m.group(2) or ""
+        if _is_raw_openspec_archive_command(inner):
+            return True
+    for seg in _SHELL_SPLIT_RE.split(text):
+        seg_str = seg.strip()
+        if not seg_str:
+            continue
+        tokens = _split_shell_tokens(seg_str)
+        if _tokens_invoke_openspec_archive(tokens):
+            return True
+    if ("subprocess" in text or "os.system" in text or "os.popen" in text) and _is_raw_openspec_archive_code(text):
+        return True
+    return False
+
+
+def _ast_node_strings(node: Any) -> list[str]:
+    import ast
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for val in node.values:
+            if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                parts.append(val.value)
+            else:
+                parts.append("placeholder")
+        return ["".join(parts)]
+    if isinstance(node, (ast.List, ast.Tuple)):
+        out: list[str] = []
+        for elt in node.elts:
+            out.extend(_ast_node_strings(elt))
+        return out
+    return []
+
+
+def _is_raw_openspec_archive_code(code: str) -> bool:
+    import ast
+
+    raw = str(code or "").strip()
+    if not raw:
+        return False
+    try:
+        tree = ast.parse(raw)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func_name = ""
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                base = node.func.value.id if isinstance(node.func.value, ast.Name) else ""
+                func_name = f"{base}.{node.func.attr}" if base else node.func.attr
+
+            all_args = list(node.args) + [kw.value for kw in node.keywords if kw.value is not None]
+            if func_name.endswith("openspec_cli"):
+                for arg_node in all_args:
+                    if isinstance(arg_node, ast.Dict):
+                        for k, v in zip(arg_node.keys, arg_node.values):
+                            if isinstance(k, ast.Constant) and k.value in ("command", "args"):
+                                strs = _ast_node_strings(v)
+                                if len(strs) == 1 and _first_openspec_subcommand(_split_shell_tokens(strs[0])) in {"archive", "bulk-archive"}:
+                                    return True
+                                if len(strs) > 1 and _first_openspec_subcommand(strs) in {"archive", "bulk-archive"}:
+                                    return True
+                    else:
+                        for s in _ast_node_strings(arg_node):
+                            if _first_openspec_subcommand(_split_shell_tokens(s)) in {"archive", "bulk-archive"}:
+                                return True
+            if any(
+                func_name == target or func_name.endswith("." + target)
+                for target in ("run", "Popen", "call", "check_call", "check_output", "system", "popen", "terminal")
+            ):
+                for arg_node in all_args:
+                    if isinstance(arg_node, (ast.List, ast.Tuple)):
+                        tokens = _ast_node_strings(arg_node)
+                        if _tokens_invoke_openspec_archive(tokens):
+                            return True
+                    else:
+                        for s in _ast_node_strings(arg_node):
+                            if _is_raw_openspec_archive_command(s):
+                                return True
+    except SyntaxError:
+        if re.search(
+            r"(?:subprocess\.\w+|os\.(?:system|popen))\s*\([^)]*openspec(?:\.exe|\.cmd)?['\"\s,]+archive\b",
+            raw,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            return True
+    return False
+
+
+def _openspec_pre_tool_call_guard(
+    tool_name: str = "",
+    args: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any] | None:
+    """Global pre_tool_call hook blocking raw `openspec archive` across terminal, execute_code, openspec_cli, and tool_call."""
+    name = str(tool_name or kwargs.get("function_name") or "").strip()
+    if ":" in name:
+        name = name.split(":")[-1]
+    lower = name.lower()
+    payload = args if isinstance(args, dict) else {}
+
+    if lower == "tool_call":
+        calls = payload.get("calls")
+        if isinstance(calls, list):
+            for entry in calls:
+                if isinstance(entry, dict):
+                    sub_res = _openspec_pre_tool_call_guard(
+                        tool_name=str(entry.get("name") or ""),
+                        args=entry.get("arguments") if isinstance(entry.get("arguments"), dict) else {},
+                    )
+                    if sub_res and sub_res.get("action") == "block":
+                        return sub_res
+        return None
+
+    if lower == "openspec_cli":
+        raw_cmd = payload.get("command")
+        raw_args = payload.get("args")
+        tokens: list[str] = []
+        if isinstance(raw_cmd, str) and raw_cmd.strip():
+            tokens.extend(_split_shell_tokens(raw_cmd))
+        elif isinstance(raw_cmd, list):
+            tokens.extend(str(x) for x in raw_cmd)
+        if isinstance(raw_args, list):
+            tokens.extend(str(x) for x in raw_args)
+        elif isinstance(raw_args, str) and raw_args.strip():
+            tokens.extend(_split_shell_tokens(raw_args))
+        if tokens and _normalize_exe_name(tokens[0]) == "openspec":
+            tokens = tokens[1:]
+        if _first_openspec_subcommand(tokens) in {"archive", "bulk-archive"}:
+            return {"action": "block", "message": _RAW_ARCHIVE_BLOCK_MESSAGE}
+        return None
+
+    if lower in {"terminal", "bash", "shell"}:
+        cmd = str(payload.get("command") or "")
+        if _is_raw_openspec_archive_command(cmd):
+            return {"action": "block", "message": _RAW_ARCHIVE_BLOCK_MESSAGE}
+        return None
+
+    if lower == "execute_code":
+        code = str(payload.get("code") or "")
+        if _is_raw_openspec_archive_code(code):
+            return {"action": "block", "message": _RAW_ARCHIVE_BLOCK_MESSAGE}
+        return None
+
+    return None
+
+
 def openspec_cli(args: dict, **kwargs) -> str:
     """Run the openspec CLI binary directly and return raw output.
 
@@ -1657,11 +2278,18 @@ def openspec_cli(args: dict, **kwargs) -> str:
     """
     import shlex
 
+    veto = _openspec_pre_tool_call_guard(tool_name="openspec_cli", args=args)
+    if veto and veto.get("action") == "block":
+        msg = str(veto.get("message") or _RAW_ARCHIVE_BLOCK_MESSAGE)
+        return json.dumps({"ok": False, "error": msg, "action": "block", "message": msg})
+
     exe = _openspec_bin()
     if exe is None:
         return _error("openspec CLI binary not found. Set OPENSPEC_BIN or install via npm.")
 
     raw_command = str(args.get("command") or "").strip()
+    if not raw_command and isinstance(args.get("args"), list):
+        raw_command = " ".join(str(x) for x in args["args"])
     if not raw_command:
         return _error("command is required (e.g. 'status --change my-change')")
 
@@ -1669,6 +2297,11 @@ def openspec_cli(args: dict, **kwargs) -> str:
         cmd_parts = shlex.split(raw_command)
     except ValueError:
         cmd_parts = raw_command.split()
+
+    if _first_openspec_subcommand(cmd_parts) in {"archive", "bulk-archive"}:
+        return json.dumps(
+            {"ok": False, "error": _RAW_ARCHIVE_BLOCK_MESSAGE, "action": "block", "message": _RAW_ARCHIVE_BLOCK_MESSAGE}
+        )
 
     json_output = args.get("json_output")
     if json_output is None:

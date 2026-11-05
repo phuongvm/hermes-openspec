@@ -322,8 +322,31 @@ OPENSPEC_CHANGE_PROMOTE = {
 
 OPENSPEC_CHANGE_ARCHIVE = {
     "name": "openspec_change_archive",
-    "description": "Archive a completed OpenSpec change, refusing incomplete tasks unless force is true.",
-    "parameters": {"type": "object", "properties": {**PROJECT_PROPS, "change": {"type": "string"}, "change_id": {"type": "string"}, "force": {"type": "boolean"}}, "required": ["change"]},
+    "description": "Archive a completed, review-approved, spec-synced OpenSpec change (non-bypassable: no force override).",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            **PROJECT_PROPS,
+            "change": {"type": "string"},
+            "change_id": {"type": "string"},
+        },
+        "required": ["change"],
+    },
+}
+
+OPENSPEC_SYNC_SPECS = {
+    "name": "openspec_sync_specs",
+    "description": "Deterministically merge ADDED, MODIFIED, and REMOVED requirements from changes/<change>/specs/ into canonical openspec/specs/ after Pre-Merge Safety checks.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            **PROJECT_PROPS,
+            "change": {"type": "string"},
+            "change_id": {"type": "string"},
+            "dry_run": {"type": "boolean", "description": "Validate and preview spec sync without writing files."},
+        },
+        "required": ["change"],
+    },
 }
 
 OPENSPEC_CHANGE_UNARCHIVE = {

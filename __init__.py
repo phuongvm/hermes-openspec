@@ -34,6 +34,7 @@ _WRITE_TOOLS = (
     ("openspec_task_set_status", schemas.OPENSPEC_TASK_SET_STATUS, tools.openspec_task_set_status, "✅"),
     ("openspec_change_create", schemas.OPENSPEC_CHANGE_CREATE, tools.openspec_change_create, "📝"),
     ("openspec_change_promote", schemas.OPENSPEC_CHANGE_PROMOTE, tools.openspec_change_promote, "➡️"),
+    ("openspec_sync_specs", schemas.OPENSPEC_SYNC_SPECS, tools.openspec_sync_specs, "🔄"),
     ("openspec_change_archive", schemas.OPENSPEC_CHANGE_ARCHIVE, tools.openspec_change_archive, "📦"),
     ("openspec_change_unarchive", schemas.OPENSPEC_CHANGE_UNARCHIVE, tools.openspec_change_unarchive, "♻️"),
     ("openspec_spec_diff", schemas.OPENSPEC_SPEC_DIFF, tools.openspec_spec_diff, "🔍"),
@@ -235,4 +236,6 @@ def register(ctx) -> None:
         check_fn=_check_openspec_available,
         emoji="🖥️",
     )
+    if callable(getattr(ctx, "register_hook", None)):
+        ctx.register_hook("pre_tool_call", tools._openspec_pre_tool_call_guard)
     register_bundled_skills(ctx)

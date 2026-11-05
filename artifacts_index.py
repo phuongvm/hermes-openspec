@@ -214,8 +214,230 @@ def scan_explorations(
 
 def _review_sort_key(path: Path) -> tuple[Any, ...]:
     rnd = parse_round(path.stem)
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
     natural = tuple(int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name))
-    return (1 if rnd is not None else 0, rnd or 0, natural)
+    return (rnd if rnd is not None else 0, mtime_ns, natural)
+
+
+_VERIFY_STEM_TOKENS = ("apply", "verify", "qa", "implementation", "post-implementation")
+_PROPOSAL_STEM_TOKENS = ("proposal", "propose", "design", "spec", "plan")
+_TASK_CHECKBOX_RE = re.compile(r"^\s*[-*+]\s*\[(?P<mark>[^\]]*)\]\s+(?P<text>.+?)\s*$")
+_GATE_REQ_HEADER_RE = re.compile(r"^###\s+Requirement:\s*(.+?)\s*$")
+_GATE_DELTA_SEC_RE = re.compile(r"^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\b", re.IGNORECASE)
+_GATE_X_EXPLORATION_RE = re.compile(r"^\s*x-exploration\s*:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def classify_review_bucket(stem: Any) -> str:
+    """Partition review filenames into ``'proposal'`` vs ``'verification'`` buckets."""
+    lower = str(stem or "").lower()
+    if any(tok in lower for tok in _VERIFY_STEM_TOKENS):
+        return "verification"
+    if any(tok in lower for tok in _PROPOSAL_STEM_TOKENS):
+        return "proposal"
+    return "proposal"
+
+
+def _resolve_openspec_dir(openspec_root: Path | str) -> tuple[Path, Path]:
+    root_path = Path(openspec_root)
+    if (root_path / "openspec" / "changes").is_dir() or (root_path / "openspec" / "specs").is_dir():
+        return root_path, root_path / "openspec"
+    if root_path.name == "openspec" or (root_path / "changes").is_dir() or (root_path / "specs").is_dir():
+        return root_path.parent, root_path
+    return root_path, root_path / "openspec"
+
+
+def _locate_change_dir(os_dir: Path, change: str) -> Path | None:
+    changes_dir = os_dir / "changes"
+    if not changes_dir.is_dir():
+        return None
+    direct = changes_dir / change
+    if direct.is_dir():
+        return direct
+    bare = strip_date_prefix(change)
+    if bare and (changes_dir / bare).is_dir():
+        return changes_dir / bare
+    archive_dir = changes_dir / "archive"
+    if archive_dir.is_dir():
+        if (archive_dir / change).is_dir():
+            return archive_dir / change
+        for child in sorted(archive_dir.iterdir()):
+            if child.is_dir() and (child.name == change or strip_date_prefix(child.name) == bare):
+                return child
+    return None
+
+
+def _compute_task_stats(tasks_path: Path) -> dict[str, int]:
+    if not tasks_path.is_file():
+        return {"total": 0, "done": 0}
+    total = 0
+    done = 0
+    for line in _read_text(tasks_path).splitlines():
+        m = _TASK_CHECKBOX_RE.match(line)
+        if not m:
+            continue
+        total += 1
+        if m.group("mark").strip().lower() == "x":
+            done += 1
+    return {"total": total, "done": done}
+
+
+def _find_unsynced_delta_specs(os_dir: Path, change_dir: Path) -> list[str]:
+    specs_dir = change_dir / "specs"
+    if not specs_dir.is_dir():
+        return []
+    unsynced: list[str] = []
+    for delta_file in sorted(specs_dir.rglob("*.md")):
+        if not delta_file.is_file():
+            continue
+        delta_text = _read_text(delta_file)
+        if "#### Scenario: Placeholder refinement" in delta_text:
+            continue
+        added_or_modified: list[str] = []
+        removed: list[str] = []
+        section = "ADDED"
+        for line in delta_text.splitlines():
+            sec_m = _GATE_DELTA_SEC_RE.match(line.strip())
+            if sec_m:
+                section = sec_m.group(1).upper()
+                continue
+            req_m = _GATE_REQ_HEADER_RE.match(line.strip())
+            if not req_m:
+                continue
+            title = req_m.group(1).strip()
+            if not title:
+                continue
+            if section in ("ADDED", "MODIFIED"):
+                if title not in added_or_modified:
+                    added_or_modified.append(title)
+            elif section == "REMOVED":
+                if title not in removed:
+                    removed.append(title)
+        if not added_or_modified and not removed:
+            continue
+        rel = delta_file.relative_to(specs_dir).as_posix()
+        canonical_file = os_dir / "specs" / rel
+        if not canonical_file.is_file():
+            if added_or_modified:
+                unsynced.append(rel)
+            continue
+        canonical_titles = {
+            m.group(1).strip()
+            for line in _read_text(canonical_file).splitlines()
+            if (m := _GATE_REQ_HEADER_RE.match(line.strip()))
+        }
+        if any(req not in canonical_titles for req in added_or_modified) or any(
+            req in canonical_titles for req in removed
+        ):
+            unsynced.append(rel)
+    return unsynced
+
+
+def evaluate_change_gate(
+    openspec_root: Path | str,
+    change: str,
+    gate: str = "verify_close",
+    *,
+    exploration_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Authoritative OpenSpec Phase-Gate evaluator shared by OpenSpec and Crew."""
+    _repo_root, os_dir = _resolve_openspec_dir(openspec_root)
+    change_name = str(change or "").strip()
+    change_dir = _locate_change_dir(os_dir, change_name) if change_name else None
+    if change_dir is None or not change_dir.is_dir():
+        return {
+            "allowed": False,
+            "gate": gate,
+            "change": change_name,
+            "missing": [f"change_not_found:{change_name}"],
+            "latest_verdict": None,
+            "proposal_verdict": None,
+            "verify_verdict": None,
+            "task_stats": {"total": 0, "done": 0},
+            "has_explorations": False,
+            "unsynced_specs": [],
+        }
+
+    review_files = sorted(_md_files(change_dir / "reviews"), key=_review_sort_key)
+    proposal_reviews: list[tuple[Path, str]] = []
+    verify_reviews: list[tuple[Path, str]] = []
+    for rpath in review_files:
+        verdict = extract_review_verdict(_read_text(rpath))
+        bucket = classify_review_bucket(rpath.stem)
+        if bucket == "verification":
+            verify_reviews.append((rpath, verdict))
+        else:
+            proposal_reviews.append((rpath, verdict))
+
+    proposal_verdict = proposal_reviews[-1][1] if proposal_reviews else None
+    verify_verdict = verify_reviews[-1][1] if verify_reviews else None
+
+    task_stats = _compute_task_stats(change_dir / "tasks.md")
+    local_explorations = _md_files(change_dir / "explorations")
+    has_explorations = bool(local_explorations) or (
+        exploration_path is not None and Path(exploration_path).is_file()
+    )
+    unsynced_specs = _find_unsynced_delta_specs(os_dir, change_dir)
+    missing: list[str] = []
+
+    if gate == "explore_ready":
+        if not has_explorations:
+            missing.append("exploration_document")
+        latest_verdict = proposal_verdict
+    elif gate == "propose_approved":
+        if not (change_dir / "proposal.md").is_file() or not _read_text(change_dir / "proposal.md").strip():
+            missing.append("proposal.md")
+        if not (change_dir / "design.md").is_file() or not _read_text(change_dir / "design.md").strip():
+            missing.append("design.md")
+        specs_dir = change_dir / "specs"
+        if not specs_dir.is_dir() or not any(p.is_file() for p in specs_dir.rglob("*.md")):
+            missing.append("specs")
+        if task_stats["total"] <= 0:
+            missing.append("tasks.md")
+        latest_verdict = proposal_verdict
+        if proposal_verdict != "APPROVED":
+            missing.append(f"proposal_review_{ (proposal_verdict or 'missing').lower() }")
+    elif gate in ("verify_close", "archive"):
+        if task_stats["total"] <= 0 or task_stats["done"] < task_stats["total"]:
+            missing.append("tasks_incomplete")
+        proposal_newer_than_verify = bool(
+            proposal_reviews
+            and (
+                not verify_reviews
+                or _review_sort_key(proposal_reviews[-1][0]) > _review_sort_key(verify_reviews[-1][0])
+            )
+        )
+        if proposal_verdict in ("REJECTED", "PENDING") and proposal_newer_than_verify:
+            missing.append(f"proposal_review_{proposal_verdict.lower()}")
+        if verify_verdict != "APPROVED":
+            missing.append(f"verification_review_{(verify_verdict or 'missing').lower()}")
+        if proposal_verdict in ("REJECTED", "PENDING") and proposal_newer_than_verify:
+            latest_verdict = proposal_verdict
+        else:
+            latest_verdict = verify_verdict
+        if gate == "archive":
+            if not local_explorations:
+                missing.append("packaged_explorations")
+            if unsynced_specs:
+                missing.append("unsynced_specs")
+    else:
+        missing.append(f"unknown_gate:{gate}")
+        latest_verdict = verify_verdict or proposal_verdict
+
+    return {
+        "allowed": len(missing) == 0,
+        "gate": gate,
+        "change": change_dir.name,
+        "missing": missing,
+        "latest_verdict": latest_verdict,
+        "proposal_verdict": proposal_verdict,
+        "verify_verdict": verify_verdict,
+        "task_stats": task_stats,
+        "has_explorations": bool(local_explorations) if gate == "archive" else has_explorations,
+        "unsynced_specs": unsynced_specs,
+    }
 
 
 def scan_reviews(change_dir: Path | str, change_name: str, token_for: TokenFor) -> list[dict[str, Any]]:
