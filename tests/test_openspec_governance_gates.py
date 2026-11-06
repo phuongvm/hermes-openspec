@@ -194,8 +194,10 @@ def test_sync_specs_pre_merge_safety_and_idempotent_merge(tmp_path: Path):
 
 
 def test_raw_archive_interception_matrix():
-    hermes_root = "O:/workspaces/oss/hermes-agent"
-    added_path = hermes_root not in sys.path
+    import os
+
+    hermes_root = os.environ.get("HERMES_AGENT_ROOT", "").strip()
+    added_path = bool(hermes_root and hermes_root not in sys.path)
     if added_path:
         sys.path.append(hermes_root)
     try:
